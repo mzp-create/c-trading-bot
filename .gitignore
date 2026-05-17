@@ -1,0 +1,27 @@
+# Credentials — NEVER commit these
+.env
+
+# Credentials — NEVER commit these
+.env
+
+# Data
+data/ohlcv/
+data/models/*.joblib
+data/trades.csv
+
+# Logs
+logs/
+
+# Dashboard secrets
+dashboard/.dashboard_password
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,102 @@
+# Crypto Trading Bot — Configuration
+trading:
+  symbols:
+    - name: "BTC/USDT"
+      symbol: "tBTCUST"
+      allocation_pct: 50.0  # 50% of capital
+      enabled: true
+    - name: "ETH/USDT"
+      symbol: "tETHUST"
+      allocation_pct: 30.0  # 30% of capital
+      enabled: true
+    - name: "SOL/USDT"
+      symbol: "tSOLUST"
+      allocation_pct: 20.0  # 20% of capital
+      enabled: true
+  initial_capital: 526.8  # USDT total across all pairs
+  daily_target: 100.0     # $100/day profit target
+  max_risk_per_trade: 0.02  # 2% max risk per trade
+  max_open_positions: 6  # 2 per pair max
+  position_size_mode: "dynamic"  # fixed, dynamic, kelly
+
+exchange:
+  name: "bitfinex"
+  testnet: false  # Set to false for live trading
+  rate_limit: 1.0  # seconds between API calls
+  ws_reconnect_delay: 5
+  default_type: "margin"  # Use margin wallet where your UST/USDT funds are
+  api_key: "${BITFINEX_API_KEY}"  # Set via env var
+  api_secret: "${BITFINEX_API_SECRET}"  # Set via env var
+
+strategies:
+  enabled: ["trend_following", "scalping", "grid"]
+  trend_following:
+    enabled: true
+    weight: 0.4
+    timeframe: "1h"
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+  scalping:
+    enabled: true
+    weight: 0.35
+    timeframe: "5m"
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    bb_period: 20
+    bb_std: 2.0
+  grid:
+    enabled: true
+    weight: 0.25
+    timeframe: "15m"
+    grid_levels: 10
+    grid_spread_pct: 0.5
+
+ml:
+  enabled: true
+  model_type: "xgboost"  # xgboost, lstm, ensemble
+  features:
+    - "rsi"
+    - "macd"
+    - "bb_upper"
+    - "bb_lower"
+    - "ema_9"
+    - "ema_21"
+    - "volume_sma"
+    - "price_change_1h"
+    - "price_change_4h"
+    - "volatility"
+  lookback: 48  # hours of data for training
+  retrain_interval: 24  # hours between retrains
+  min_train_samples: 100
+
+risk:
+  max_daily_loss: 20.0    # Stop trading after $20 daily loss (with $100 capital)
+  max_drawdown_pct: 15.0   # Max drawdown before stopping
+  stop_loss_pct: 2.0       # Per position stop loss
+  take_profit_pct: 4.0     # Per position take profit
+  trailing_stop: true
+  trailing_stop_activation: 2.0  # Activate after 2% profit
+  trailing_stop_distance: 0.5    # Trailing stop at 0.5% below peak
+  cooldown_after_loss: 300       # 5 min cooldown after loss
+
+monitoring:
+  log_level: "INFO"
+  save_trades: true
+  save_equity_curve: true
+  telegram_alerts: true
+  telegram_bot_token: ""  # Set via env var
+  telegram_chat_id: ""    # Set via env var
+  alert_on_trade: true
+  alert_on_drawdown: true
+  daily_summary: true
+
+data:
+  ohlcv_dir: "data/ohlcv/"
+  models_dir: "data/models/"
+  trades_file: "data/trades.csv"
+  equity_file: "data/equity.csv"
+  log_file: "logs/bot.log"

@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes Trading Bot Dashboard</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg-primary: #0a0e1a;
+  --bg-secondary: #111827;
+  --bg-card: #1a2235;
+  --bg-hover: #243044;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent-green: #22c55e;
+  --accent-green-dim: #166534;
+  --accent-red: #ef4444;
+  --accent-red-dim: #991b1b;
+  --accent-blue: #3b82f6;
+  --accent-yellow: #eab308;
+  --border: #1e293b;
+  --shadow: rgba(0, 0, 0, 0.3);
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+/* Navbar */
+.navbar {
+  background: linear-gradient(135deg, #0f172a 0%, #1a2235 100%);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(8px);
+}
+.navbar-title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.navbar-title .status-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-left: 4px;
+}
+.navbar-title .status-dot.running { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+.navbar-title .status-dot.stopped { background: var(--accent-red); box-shadow: 0 0 8px var(--accent-red); }
+.navbar-title .status-dot.unknown { background: var(--text-muted); }
+.navbar-right {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.navbar-right .refresh-badge {
+  background: var(--bg-card);
+  padding: 4px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+}
+/* Layout */
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+.grid-full { grid-column: 1 / -1; }
+@media (max-width: 900px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+}
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: border-color 0.2s;
+}
+.card:hover { border-color: #334155; }
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.card-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.card-value {
+  font-size: 2rem;
+  font-weight: 700;
+}
+.card-value.green { color: var(--accent-green); }
+.card-value.red { color: var(--accent-red); }
+.card-value.yellow { color: var(--accent-yellow); }
+.card-value.blue { color: var(--accent-blue); }
+/* Stat rows */
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.5);
+}
+.stat-row:last-child { border-bottom: none; }
+.stat-label {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+.stat-value {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.stat-value.small { font-size: 0.85rem; font-family: 'SF Mono', 'Fira Code', monospace; }
+/* Wallet table */
+.wallet-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.wallet-table th {
+  text-align: left;
+  padding: 8px 6px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+.wallet-table td {
+  padding: 8px 6px;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.5);
+}
+.wallet-table tr:last-child td { border-bottom: none; }
+.wallet-type {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.wallet-type.margin { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); }
+.wallet-type.exchange { background: rgba(34, 197, 94, 0.15); color: var(--accent-green); }
+.wallet-type.funding { background: rgba(234, 179, 8, 0.15); color: var(--accent-yellow); }
+/* Trades table */
+.trades-table-container {
+  overflow-x: auto;
+}
+.trades-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  min-width: 600px;
+}
+.trades-table th {
+  text-align: left;
+  padding: 10px 8px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.trades-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.5);
+  white-space: nowrap;
+}
+.trades-table tr:hover td { background: var(--bg-hover); }
+.pnl-positive { color: var(--accent-green); font-weight: 600; }
+.pnl-negative { color: var(--accent-red); font-weight: 600; }
+.pnl-zero { color: var(--text-muted); }
+.side-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.side-badge.buy { background: rgba(34, 197, 94, 0.15); color: var(--accent-green); }
+.side-badge.sell { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); }
+/* Loading / empty */
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: var(--text-muted);
+}
+.loading::after {
+  content: '';
+  width: 20px; height: 20px;
+  margin-left: 10px;
+  border: 2px solid var(--text-muted);
+  border-top-color: var(--accent-green);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.empty-state {
+  text-align: center;
+  padding: 30px;
+  color: var(--text-muted);
+}
+.empty-state .empty-icon { font-size: 2.5rem; margin-bottom: 12px; }
+.empty-state .empty-text { font-size: 0.95rem; }
+.error-state {
+  text-align: center;
+  padding: 20px;
+  color: var(--accent-red);
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: var(--radius-sm);
+  margin: 8px 0;
+}
+/* Metrics */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin-top: 4px;
+}
+.metric {
+  background: rgba(15, 23, 42, 0.5);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  text-align: center;
+}
+.metric-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+.metric-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+.metric-value.green { color: var(--accent-green); }
+.metric-value.red { color: var(--accent-red); }
+.metric-value.yellow { color: var(--accent-yellow); }
+.metric-value.blue { color: var(--accent-blue); }
+/* Config */
+.config-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 20px;
+}
+.config-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.3);
+}
+.config-item .config-label {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.config-item .config-value {
+  font-weight: 500;
+  font-size: 0.85rem;
+}
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin: 2px;
+}
+.tag.strategy {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--accent-blue);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+}
+/* Responsive */
+@media (max-width: 600px) {
+  .container { padding: 12px; }
+  .navbar { padding: 12px 16px; }
+  .navbar-title { font-size: 1.1rem; }
+  .card-value { font-size: 1.5rem; }
+  .config-list { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<nav class="navbar">
+  <div class="navbar-title">
+    <span>🤖 Hermes Trading Bot</span>
+    <span class="status-dot" id="navStatusDot"></span>
+  </div>
+  <div class="navbar-right">
+    <span id="lastUpdated">--</span>
+    <span class="refresh-badge" id="refreshBadge">auto 30s</span>
+  </div>
+</nav>
+
+<div class="container" id="app">
+
+  <!-- Row 1: Balance + Bot Status -->
+  <div class="grid-2">
+    <!-- Balance Card -->
+    <div class="card" id="balanceCard">
+      <div class="card-header">
+        <span class="card-title">💰 Balance</span>
+        <span id="balanceSource" style="font-size:0.75rem;color:var(--text-muted)"></span>
+      </div>
+      <div class="card-value green" id="totalBalance">--</div>
+      <div style="margin-top:8px;font-size:0.85rem;color:var(--text-muted)">Total Value (USD)</div>
+      <div style="margin-top:12px">
+        <table class="wallet-table">
+          <thead><tr><th>Type</th><th>Currency</th><th>Balance</th><th>Available</th></tr></thead>
+          <tbody id="walletRows">
+            <tr><td colspan="4" class="loading">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Bot Status Card -->
+    <div class="card" id="statusCard">
+      <div class="card-header">
+        <span class="card-title">📊 Bot Status</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Status</span>
+        <span class="stat-value" id="botStatus">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Mode</span>
+        <span class="stat-value" id="botMode">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Uptime</span>
+        <span class="stat-value" id="botUptime">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Last Analysis</span>
+        <span class="stat-value" id="lastAnalysis">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Signal Confidence</span>
+        <span class="stat-value" id="signalConfidence">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Initialized</span>
+        <span class="stat-value small" id="initTime">--</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 2: Performance -->
+  <div class="card" style="margin-top:20px">
+    <div class="card-header">
+      <span class="card-title">📈 Performance Metrics</span>
+    </div>
+    <div class="metrics-grid" id="perfMetrics">
+      <div class="metric">
+        <div class="metric-label">Total Trades</div>
+        <div class="metric-value blue" id="totalTrades">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Win Rate</div>
+        <div class="metric-value" id="winRate">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Total P&amp;L</div>
+        <div class="metric-value" id="totalPnl">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Avg P&amp;L</div>
+        <div class="metric-value" id="avgPnl">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Wins</div>
+        <div class="metric-value green" id="totalWins">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Losses</div>
+        <div class="metric-value red" id="totalLosses">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Best Trade</div>
+        <div class="metric-value green small" id="bestTrade">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Worst Trade</div>
+        <div class="metric-value red small" id="worstTrade">--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 3: Trades -->
+  <div class="card" style="margin-top:20px">
+    <div class="card-header">
+      <span class="card-title">📋 Recent Trades</span>
+      <span style="font-size:0.85rem;color:var(--text-muted)" id="tradeCount"></span>
+    </div>
+    <div class="trades-table-container">
+      <table class="trades-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Side</th>
+            <th>Symbol</th>
+            <th>Entry</th>
+            <th>Close</th>
+            <th>Amount</th>
+            <th>P&amp;L</th>
+            <th>Reason</th>
+            <th>Mode</th>
+          </tr>
+        </thead>
+        <tbody id="tradesBody">
+          <tr><td colspan="9" class="empty-state">
+            <div class="empty-icon">📭</div>
+            <div class="empty-text">Loading trades...</div>
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Row 4: Config -->
+  <div class="card" style="margin-top:20px">
+    <div class="card-header">
+      <span class="card-title">⚙️ Configuration</span>
+    </div>
+    <div id="configContent">
+      <div class="loading">Loading config...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Dashboard App
+// ---------------------------------------------------------------------------
+const API_BASE = '';
+
+async function fetchJSON(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+function formatPnl(pnl) {
+  if (pnl == null || pnl === undefined || isNaN(pnl)) return '--';
+  const val = typeof pnl === 'string' ? parseFloat(pnl) : pnl;
+  if (val > 0) return `<span class="pnl-positive">+$${val.toFixed(2)}</span>`;
+  if (val < 0) return `<span class="pnl-negative">-$${Math.abs(val).toFixed(2)}</span>`;
+  return `<span class="pnl-zero">$0.00</span>`;
+}
+
+function formatCurrency(val, decimals) {
+  if (val == null || isNaN(val)) return '--';
+  decimals = decimals || 2;
+  return '$' + Number(val).toFixed(decimals);
+}
+
+function formatNumber(val, decimals) {
+  if (val == null || isNaN(val)) return '--';
+  decimals = decimals || 2;
+  return Number(val).toFixed(decimals);
+}
+
+function formatDate(ts) {
+  if (!ts) return '--';
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return ts;
+    return d.toLocaleString('en-US', {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+  } catch(e) { return ts; }
+}
+
+// ---- Balance ----
+async function loadBalance() {
+  const el = document.getElementById('totalBalance');
+  const walletRows = document.getElementById('walletRows');
+  const sourceEl = document.getElementById('balanceSource');
+
+  try {
+    const data = await fetchJSON(API_BASE + '/api/balance');
+    el.textContent = formatCurrency(data.total_usd);
+    sourceEl.textContent = data.source === 'bitfinex_live' ? 'Live API' : 'Config';
+
+    let html = '';
+    if (data.wallets && data.wallets.length > 0) {
+      for (const w of data.wallets) {
+        html += `<tr>
+          <td><span class="wallet-type ${w.type}">${w.type}</span></td>
+          <td><strong>${w.currency}</strong></td>
+          <td>${formatNumber(w.balance, w.currency === 'BTC' ? 6 : 2)}</td>
+          <td>${formatNumber(w.available, w.currency === 'BTC' ? 6 : 2)}</td>
+        </tr>`;
+      }
+    } else {
+      html = `<tr><td colspan="4" class="empty-state">
+        <div class="empty-text">No wallet data available</div>
+      </td></tr>`;
+    }
+    walletRows.innerHTML = html;
+  } catch (err) {
+    el.textContent = '--';
+    walletRows.innerHTML = `<tr><td colspan="4" class="error-state">
+      Error loading balance: ${err.message}
+    </td></tr>`;
+  }
+}
+
+// ---- Status ----
+async function loadStatus() {
+  const dot = document.getElementById('navStatusDot');
+  const statusEl = document.getElementById('botStatus');
+  const modeEl = document.getElementById('botMode');
+  const uptimeEl = document.getElementById('botUptime');
+  const analysisEl = document.getElementById('lastAnalysis');
+  const confidenceEl = document.getElementById('signalConfidence');
+  const initEl = document.getElementById('initTime');
+
+  try {
+    const data = await fetchJSON(API_BASE + '/api/status');
+    const s = data.status || 'unknown';
+    dot.className = 'status-dot ' + s;
+    statusEl.innerHTML = s === 'running'
+      ? '<span style="color:var(--accent-green)">● Running</span>'
+      : s === 'stopped'
+        ? '<span style="color:var(--accent-red)">● Stopped</span>'
+        : '<span style="color:var(--text-muted)">● Unknown</span>';
+    modeEl.textContent = data.mode || '--';
+    uptimeEl.textContent = data.uptime || '--';
+    analysisEl.textContent = data.last_analysis || '--';
+
+    if (data.last_analysis_confidence != null) {
+      const conf = (data.last_analysis_confidence * 100).toFixed(0);
+      const color = conf >= 60 ? 'var(--accent-green)' : conf >= 30 ? 'var(--accent-yellow)' : 'var(--accent-red)';
+      confidenceEl.innerHTML = `<span style="color:${color}">${conf}%</span>`;
+    } else {
+      confidenceEl.textContent = '--';
+    }
+
+    initEl.textContent = data.initialized_at ? formatDate(data.initialized_at) : '--';
+  } catch (err) {
+    dot.className = 'status-dot unknown';
+    statusEl.textContent = 'Error';
+    modeEl.textContent = '--';
+  }
+}
+
+// ---- Trades ----
+async function loadTrades() {
+  const tbody = document.getElementById('tradesBody');
+  const countEl = document.getElementById('tradeCount');
+
+  try {
+    const data = await fetchJSON(API_BASE + '/api/trades');
+    const trades = data.trades || [];
+    countEl.textContent = trades.length + ' trade' + (trades.length !== 1 ? 's' : '');
+
+    if (trades.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="9" class="empty-state">
+        <div class="empty-icon">📭</div>
+        <div class="empty-text">No trades yet</div>
+      </td></tr>`;
+      return;
+    }
+
+    let html = '';
+    for (const t of trades) {
+      const pnl = parseFloat(t.pnl) || 0;
+      html += `<tr>
+        <td>${formatDate(t.timestamp)}</td>
+        <td><span class="side-badge ${t.side}">${t.side}</span></td>
+        <td>${t.symbol || '--'}</td>
+        <td>${formatCurrency(t.entry_price, 2)}</td>
+        <td>${formatCurrency(t.close_price, 2)}</td>
+        <td>${formatNumber(t.amount, 4)}</td>
+        <td>${formatPnl(pnl)}</td>
+        <td>${t.reason || '--'}</td>
+        <td>${t.mode || '--'}</td>
+      </tr>`;
+    }
+    tbody.innerHTML = html;
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="9" class="error-state">
+      Error loading trades: ${err.message}
+    </td></tr>`;
+  }
+}
+
+// ---- Summary ----
+async function loadSummary() {
+  const triesEl = document.getElementById('totalTrades');
+  const winRateEl = document.getElementById('winRate');
+  const totalPnlEl = document.getElementById('totalPnl');
+  const avgPnlEl = document.getElementById('avgPnl');
+  const winsEl = document.getElementById('totalWins');
+  const lossesEl = document.getElementById('totalLosses');
+  const bestEl = document.getElementById('bestTrade');
+  const worstEl = document.getElementById('worstTrade');
+
+  try {
+    const data = await fetchJSON(API_BASE + '/api/summary');
+    triesEl.textContent = data.total_trades || 0;
+    winRateEl.textContent = data.total_trades > 0 ? data.win_rate + '%' : '0%';
+    winRateEl.className = 'metric-value ' + (data.win_rate >= 50 ? 'green' : data.win_rate > 0 ? 'yellow' : '');
+    totalPnlEl.innerHTML = formatPnl(data.total_pnl);
+    totalPnlEl.className = 'metric-value';
+    avgPnlEl.innerHTML = formatPnl(data.avg_pnl);
+    avgPnlEl.className = 'metric-value';
+    winsEl.textContent = data.total_wins || 0;
+    lossesEl.textContent = data.total_losses || 0;
+
+    if (data.best_trade) {
+      bestEl.innerHTML = `${formatPnl(data.best_trade.pnl)}<br><span style="font-size:0.7rem">${data.best_trade.side} ${data.best_trade.symbol}</span>`;
+    } else {
+      bestEl.textContent = '--';
+    }
+    if (data.worst_trade) {
+      worstEl.innerHTML = `${formatPnl(data.worst_trade.pnl)}<br><span style="font-size:0.7rem">${data.worst_trade.side} ${data.worst_trade.symbol}</span>`;
+    } else {
+      worstEl.textContent = '--';
+    }
+  } catch (err) {
+    triesEl.textContent = '--';
+    winRateEl.textContent = 'Error';
+  }
+}
+
+// ---- Config ----
+async function loadConfig() {
+  const configContent = document.getElementById('configContent');
+
+  try {
+    const data = await fetchJSON(API_BASE + '/api/config');
+    if (data.error) {
+      configContent.innerHTML = `<div class="error-state">${data.error}</div>`;
+      return;
+    }
+
+    let stratHtml = '';
+    if (data.enabled_strategies && data.enabled_strategies.length > 0) {
+      stratHtml = data.enabled_strategies.map(s =>
+        `<span class="tag strategy">${s.replace(/_/g, ' ')}</span>`
+      ).join(' ');
+    } else {
+      stratHtml = '<span style="color:var(--text-muted)">None</span>';
+    }
+
+    configContent.innerHTML = `<div class="config-list">
+      <div class="config-item"><span class="config-label">Symbol</span><span class="config-value">${data.symbol || '--'}</span></div>
+      <div class="config-item"><span class="config-label">Capital</span><span class="config-value">${formatCurrency(data.initial_capital)}</span></div>
+      <div class="config-item"><span class="config-label">Daily Target</span><span class="config-value">${formatCurrency(data.daily_target)}</span></div>
+      <div class="config-item"><span class="config-label">Max Risk / Trade</span><span class="config-value">${data.max_risk_per_trade_pct || 0}%</span></div>
+      <div class="config-item"><span class="config-label">Max Open Positions</span><span class="config-value">${data.max_open_positions || 0}</span></div>
+      <div class="config-item"><span class="config-label">Position Mode</span><span class="config-value">${data.position_size_mode || '--'}</span></div>
+      <div class="config-item"><span class="config-label">Exchange</span><span class="config-value">${data.exchange_name || '--'} (${data.mode || '--'})</span></div>
+      <div class="config-item"><span class="config-label">Wallet Type</span><span class="config-value">${data.default_wallet_type || '--'}</span></div>
+      <div class="config-item"><span class="config-label">Stop Loss</span><span class="config-value">${data.stop_loss_pct || 0}%</span></div>
+      <div class="config-item"><span class="config-label">Take Profit</span><span class="config-value">${data.take_profit_pct || 0}%</span></div>
+      <div class="config-item"><span class="config-label">Max Daily Loss</span><span class="config-value">${formatCurrency(data.max_daily_loss)}</span></div>
+      <div class="config-item"><span class="config-label">Max Drawdown</span><span class="config-value">${data.max_drawdown_pct || 0}%</span></div>
+      <div class="config-item"><span class="config-label">Trailing Stop</span><span class="config-value">${data.trailing_stop ? '✅ Yes' : '❌ No'}</span></div>
+      <div class="config-item config-full" style="grid-column:1/-1">
+        <span class="config-label">Enabled Strategies</span>
+        <span class="config-value">${stratHtml}</span>
+      </div>
+    </div>`;
+  } catch (err) {
+    configContent.innerHTML = `<div class="error-state">Error loading config: ${err.message}</div>`;
+  }
+}
+
+// ---- Update timestamp ----
+function updateTimestamp() {
+  document.getElementById('lastUpdated').textContent =
+    'Updated: ' + new Date().toLocaleTimeString();
+}
+
+// ---- Full refresh ----
+async function refreshAll() {
+  updateTimestamp();
+  await Promise.allSettled([
+    loadBalance(),
+    loadStatus(),
+    loadTrades(),
+    loadSummary(),
+    loadConfig()
+  ]);
+}
+
+// ---- Init ----
+refreshAll();
+setInterval(refreshAll, 30000);
+</script>
+</body>
+</html>
