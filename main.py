@@ -57,6 +57,7 @@ from analysis.technical import TechnicalAnalyzer
 from analysis.ml_predictor import MLPredictor
 from strategies.selector import StrategySelector
 from risk.manager import RiskManager
+from risk.regime_detector import MarketRegimeDetector, MarketRegime
 from execution.engine import ExecutionEngine
 from monitoring.logger import BotLogger
 from monitoring.telegram_alerts import TelegramNotifier
@@ -84,6 +85,7 @@ class TradingBot:
         self.ml_predictor = MLPredictor(self.config)
         self.strategies = StrategySelector(self.config)
         self.risk = RiskManager(self.config)
+        self.regime_detector = MarketRegimeDetector(self.config)
         self.executor = ExecutionEngine(self.config, mode=mode)
 
         self.log = self.logger.get_logger("Bot")
@@ -246,6 +248,48 @@ class TradingBot:
                 self.log.info(f"[{symbol}] HOLD — {decision['reason']}")
                 return decision
 
+            # Get fresh market data for regime detection
+            regime = MarketRegime.RANGING
+            regime_params = None
+            try:
+                df_regime = self.collector.get_ohlcv(
+                    symbol, timeframe="1h",
+                    limit=self.config.get('regime_detector', {}).get('lookback', 50) + 20
+                )
+                if df_regime is not None and len(df_regime) > 30:
+                    regime = self.regime_detector.detect(df_regime)
+                    base_sl = float(self.config.get('risk', {}).get('stop_loss_pct', 2.0))
+                    base_tp = float(self.config.get('risk', {}).get('take_profit_pct', 5.0))
+                    regime_params = self.regime_detector.get_adapted_params(
+                        regime, base_sl, base_tp
+                    )
+                    self.log.info(
+                        f"[{symbol}] Regime: {regime.value} | "
+                        f"SL={regime_params['stop_loss_pct']}% "
+                        f"TP={regime_params['take_profit_pct']}% "
+                        f"Size={regime_params['position_size_mult']}x"
+                    )
+            except Exception as e:
+                self.log.warning(f"[{symbol}] Regime detection error: {e}")
+
+            # Check correlation limits (prevent over-concentration)
+            if self.config.get('regime_detector', {}).get('enabled', True):
+                open_positions = self.executor.open_positions
+                if open_positions:
+                    max_corr = float(
+                        self.config.get('regime_detector', {})
+                        .get('max_correlation', 0.7)
+                    )
+                    corr_ok, corr_val = self.regime_detector.check_correlation(
+                        symbol, open_positions, max_corr
+                    )
+                    if not corr_ok:
+                        self.log.warning(
+                            f"[{symbol}] Skipping — too correlated "
+                            f"(corr={corr_val:.2f}, limit={max_corr})"
+                        )
+                        return decision
+
             # Get position size
             price = decision['current_price']
             if price <= 0:
@@ -253,37 +297,60 @@ class TradingBot:
 
             # Risk-adjusted position sizing — use pair's allocated capital
             effective_capital = pair_capital + (self.daily_pnl / max(len(self.symbols), 1))
+            regime_size_mult = (
+                regime_params['position_size_mult']
+                if regime_params else 1.0
+            )
             position_size = self.risk.calculate_position_size(
                 capital=effective_capital,
                 price=price,
                 confidence=decision['confidence'],
-                signal_type=decision['signal']
+                signal_type=decision['signal'],
+                regime_position_mult=regime_size_mult,
             )
 
             if position_size <= 0:
                 self.log.info(f"[{symbol}] Position size too small, skipping trade")
                 return
 
+            # Determine regime-adjusted SL/TP
+            stop_loss_pct = (
+                regime_params['stop_loss_pct']
+                if regime_params
+                else float(self.config.get('risk', {}).get('stop_loss_pct', 2.0))
+            )
+            take_profit_pct = (
+                regime_params['take_profit_pct']
+                if regime_params
+                else float(self.config.get('risk', {}).get('take_profit_pct', 5.0))
+            )
+
             # Execute order
             self.log.info(f"[{symbol}] Executing {decision['signal']} — Size: {position_size:.6f} @ ${price:.2f} | "
-                         f"Conf: {decision['confidence']:.2f}")
+                         f"Conf: {decision['confidence']:.2f} | Regime: {regime.value}")
 
             result = self.executor.execute_order(
                 symbol=symbol,
                 side=decision['signal'].lower(),
                 amount=position_size,
                 price=price,
-                stop_loss_pct=self.config.get('risk', {}).get('stop_loss_pct', 2.0),
-                take_profit_pct=self.config.get('risk', {}).get('take_profit_pct', 5.0),
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
             )
 
             if result.get('success'):
                 self.trade_count += 1
                 short_name = symbol.split('/')[0]
-                msg = (f"🟢 **Trade Executed**\n"
+                emoji_regime = {
+                    'TRENDING': '📈',
+                    'RANGING': '📊',
+                    'VOLATILE': '🌪️',
+                }.get(regime.value, '🤖')
+                msg = (f"{emoji_regime} **Trade Executed**\n"
                        f"*{short_name}* — {decision['signal']}\n"
                        f"Amount: {position_size:.6f}\n"
                        f"Price: ${price:.2f}\n"
+                       f"Regime: {regime.value}\n"
                        f"Confidence: {decision['confidence']:.2%}\n"
                        f"Reason: {decision['reason']}")
                 self.telegram.send(msg)

@@ -73,6 +73,28 @@ ml:
   retrain_interval: 24  # hours between retrains
   min_train_samples: 100
 
+regime_detector:
+  enabled: true
+  adx_trending_threshold: 25    # ADX >= 25 → trending
+  adx_ranging_threshold: 20     # ADX < 20 → ranging
+  volatility_ratio_threshold: 1.5  # > 1.5x hist vol → volatile
+  lookback: 50                  # periods to compute vol ratio
+  trend_lookback: 14            # periods for ADX
+  max_correlation: 0.7          # max pairwise corr for multi-asset
+  regime_params:
+    TRENDING:
+      stop_loss_mult: 1.2       # wider stops
+      take_profit_mult: 1.5     # bigger targets
+      position_size_mult: 1.0   # full size
+    RANGING:
+      stop_loss_mult: 0.8       # tighter stops
+      take_profit_mult: 0.7     # smaller targets
+      position_size_mult: 0.8   # 80% size
+    VOLATILE:
+      stop_loss_mult: 1.5       # much wider stops
+      take_profit_mult: 1.0     # normal targets
+      position_size_mult: 0.5   # half size
+
 risk:
   max_daily_loss: 20.0    # Stop trading after $20 daily loss (with $100 capital)
   max_drawdown_pct: 15.0   # Max drawdown before stopping

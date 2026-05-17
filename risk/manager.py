@@ -101,6 +101,7 @@ class RiskManager:
         price: float,
         confidence: float,
         signal_type: str,
+        regime_position_mult: float = 1.0,
     ) -> float:
         """Dynamic position sizing using Kelly-based logic.
 
@@ -108,8 +109,22 @@ class RiskManager:
           1. Base = capital * max_risk_per_trade (default 2%)
           2. Scale by confidence multiplier (0.5x – 1.5x)
           3. Scale down by volatility
-          4. Scale down by daily PnL (if losing)
-          5. Clamp to max 20% of capital per trade
+          4. Apply regime position size multiplier
+          5. Scale down by daily PnL (if losing)
+          6. Clamp to max 20% of capital per trade
+
+        Parameters
+        ----------
+        capital : float
+            Available capital.
+        price : float
+            Current asset price.
+        confidence : float
+            Signal confidence (0.0 – 1.0).
+        signal_type : str
+            'BUY' or 'SELL'.
+        regime_position_mult : float
+            Regime-adjusted size multiplier (0.5 for volatile, 1.0 for trending, etc.)
 
         Returns the **base currency amount** (e.g. BTC) to trade.
         """
@@ -135,7 +150,11 @@ class RiskManager:
         vol_mult = 1.0
         # (actual vol adjustment applied if caller passes ATR data via a future extension)
 
-        # 4. Daily PnL adjustment (losing day = smaller positions)
+        # 4. Regime position size multiplier
+        regime_mult = max(0.1, min(2.0, float(regime_position_mult)))
+        base_value *= regime_mult
+
+        # 5. Daily PnL adjustment (losing day = smaller positions)
         # The caller tracks daily_pnl externally; we clamp by scaling.
         # The check_trade_allowed already gates trading. Here we just
         # note that capital already reflects daily_pnl.
