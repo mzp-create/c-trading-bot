@@ -122,7 +122,9 @@ class MarketRegimeDetector:
         """
         import numpy as np
 
-        close = df["Close"].values
+        # Normalize column names (uppercase internally)
+        df.columns = [c.lower() for c in df.columns]
+        close = df["close"].values
 
         n = len(close)
         if n < self._lookback + 14:

@@ -117,6 +117,54 @@ class TradingBot:
         self.log.info(f"🎯 Daily Target: ${self.config.get('trading', {}).get('daily_target', 100)}")
         self.log.info(f"⚙️  Max Positions: {self.config.get('trading', {}).get('max_open_positions', 6)}")
 
+    def _flatten_ta(self, ta_dict: dict) -> dict:
+        """Flatten nested TA dict into flat keys that strategies expect."""
+        flat = {
+            "current_price": ta_dict.get("current_price", 0),
+            "close": ta_dict.get("current_price", 0),
+            "signal": ta_dict.get("signal", "HOLD"),
+            "confidence": ta_dict.get("confidence", 0.0),
+            "trend": ta_dict.get("trend", "neutral"),
+        }
+        # Indicators sub-dict (most important)
+        ind = ta_dict.get("indicators", {})
+        for k, v in ind.items():
+            flat[k] = v
+        # Top-level TA values
+        for k in ["rsi", "ema_9", "ema_21"]:
+            if k in ta_dict:
+                flat[k] = ta_dict[k]
+        # Volume
+        vp = ta_dict.get("volume_profile", {})
+        flat["volume"] = vp.get("current", ind.get("volume", 0))
+        flat["volume_sma"] = vp.get("sma", ind.get("volume_sma", 0))
+        flat["volume_avg"] = flat["volume_sma"]
+        # Bollinger
+        bb = ta_dict.get("bollinger", {})
+        flat["bb_upper"] = bb.get("upper", ind.get("bb_upper", 0))
+        flat["bb_lower"] = bb.get("lower", ind.get("bb_lower", 0))
+        flat["bb_mid"] = bb.get("middle", ind.get("bb_middle", 0))
+        flat["bb_ma"] = flat["bb_mid"]
+        flat["bb_position"] = bb.get("position", 0)
+        # MACD
+        macd = ta_dict.get("macd", {})
+        flat["macd"] = macd.get("value", ind.get("macd", 0))
+        flat["macd_histogram"] = macd.get("histogram", ind.get("macd_histogram", 0))
+        flat["macd_hist"] = flat["macd_histogram"]
+        flat["macd_histogram_prev"] = macd.get("histogram_prev", ind.get("macd_histogram_prev", flat["macd_hist"]))
+        flat["macd_hist_prev"] = flat["macd_histogram_prev"]
+        flat["macd_signal"] = macd.get("signal", ind.get("macd_signal", 0))
+        # ATR / vol
+        flat["atr"] = ind.get("atr", 0)
+        bb_u = flat.get("bb_upper", 0)
+        bb_l = flat.get("bb_lower", 0)
+        flat["bb_width"] = bb_u - bb_l if bb_u and bb_l else 0
+        # bb_prev_width — estimate from second-to-last candle if possible
+        bb_prev_u = ind.get("bb_upper_prev", 0) or flat["bb_upper"]
+        bb_prev_l = ind.get("bb_lower_prev", 0) or flat["bb_lower"]
+        flat["bb_prev_width"] = bb_prev_u - bb_prev_l if bb_prev_u and bb_prev_l else flat["bb_width"]
+        return flat
+
     def analyze_market(self, symbol: str = "BTC/USDT", exchange_symbol: str = None) -> Dict[str, Any]:
         """Analyze market data and return trading signals for a given symbol."""
         # 1. Get fresh market data
@@ -128,9 +176,14 @@ class TradingBot:
             return {"signal": "HOLD", "confidence": 0.0, "reason": "Insufficient data", "symbol": symbol}
 
         # 2. Technical analysis on all timeframes
-        ta_1h = self.analyzer.analyze(df_1h, "1h")
-        ta_5m = self.analyzer.analyze(df_5m, "5m")
-        ta_15m = self.analyzer.analyze(df_15m, "15m")
+        ta_1h_raw = self.analyzer.analyze(df_1h, "1h")
+        ta_5m_raw = self.analyzer.analyze(df_5m, "5m")
+        ta_15m_raw = self.analyzer.analyze(df_15m, "15m")
+
+        # Flatten nested TA keys so strategies can access e.g. ta["ema_9"]
+        ta_1h = self._flatten_ta(ta_1h_raw)
+        ta_5m = self._flatten_ta(ta_5m_raw)
+        ta_15m = self._flatten_ta(ta_15m_raw)
 
         # 3. ML prediction
         ml_signal = self.ml_predictor.predict(df_1h, symbol=symbol)
