@@ -112,7 +112,10 @@ class TelegramNotifier:
 
     def send_cycle_summary(self, results: list[dict], daily_pnl: float,
                            open_positions: int, trade_count: int):
-        """Send a compact cycle summary for all pairs."""
+        """Send a compact cycle summary for all pairs. Only sends if there are open positions or trades today."""
+        # Quiet mode — only alert if something changed
+        if open_positions == 0 and trade_count == 0:
+            return True
         lines = ["🔄 **Bot Cycle**"]
         for r in results:
             sym = r.get("symbol_name", r.get("symbol", "?"))

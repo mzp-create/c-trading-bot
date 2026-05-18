@@ -95,6 +95,16 @@ regime_detector:
       take_profit_mult: 1.0     # normal targets
       position_size_mult: 0.5   # half size
 
+sentiment:
+  enabled: true
+  cache_ttl: 300                 # 5 min cache
+  source_weights:
+    rss: 1.0                     # Always enabled, free
+    newsapi: 0.5                 # Needs NEWSAPI_KEY env var
+    reddit: 0.5                  # Needs REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET
+  llm_model: ""                  # Set to "deepseek-chat" to enable LLM scoring
+  filter_strength: "normal"      # "aggressive" | "normal" | "light"
+
 risk:
   max_daily_loss: 20.0    # Stop trading after $20 daily loss (with $100 capital)
   max_drawdown_pct: 15.0   # Max drawdown before stopping

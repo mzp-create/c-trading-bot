@@ -58,6 +58,7 @@ from analysis.ml_predictor import MLPredictor
 from strategies.selector import StrategySelector
 from risk.manager import RiskManager
 from risk.regime_detector import MarketRegimeDetector, MarketRegime
+from analysis.sentiment import SentimentAnalyzer
 from execution.engine import ExecutionEngine
 from monitoring.logger import BotLogger
 from monitoring.telegram_alerts import TelegramNotifier
@@ -86,6 +87,7 @@ class TradingBot:
         self.strategies = StrategySelector(self.config)
         self.risk = RiskManager(self.config)
         self.regime_detector = MarketRegimeDetector(self.config)
+        self.sentiment = SentimentAnalyzer(self.config)
         self.executor = ExecutionEngine(self.config, mode=mode)
 
         self.log = self.logger.get_logger("Bot")
@@ -241,28 +243,60 @@ class TradingBot:
             sell_score /= total_weight
 
         # Decision
-        confidence_threshold = 0.55
+        confidence_threshold = 0.50
         if buy_score > sell_score and buy_score > confidence_threshold:
-            return {
-                "signal": "BUY",
-                "confidence": buy_score,
-                "sell_confidence": sell_score,
-                "reason": " | ".join(reasons),
-                "current_price": ta.get('current_price', 0),
-            }
+            signal = "BUY"
+            confidence = buy_score
         elif sell_score > buy_score and sell_score > confidence_threshold:
-            return {
-                "signal": "SELL",
-                "confidence": sell_score,
-                "buy_confidence": buy_score,
-                "reason": " | ".join(reasons),
-                "current_price": ta.get('current_price', 0),
-            }
+            signal = "SELL"
+            confidence = sell_score
         else:
             return {
                 "signal": "HOLD",
                 "confidence": max(buy_score, sell_score),
                 "reason": " | ".join(reasons) if reasons else "No strong signal",
+                "current_price": ta.get('current_price', 0),
+            }
+
+        # Layer 2: Sentiment confirmation (applied only to BUY/SELL signals)
+        if self.config.get("sentiment", {}).get("enabled", False):
+            symbol_raw = ta.get("symbol", ta.get("close_symbol", ""))
+            if not symbol_raw:
+                # Try to extract from context — fall back to BTC
+                symbol_raw = "BTC"
+            coin_symbol = symbol_raw.split("/")[0] if "/" in symbol_raw else symbol_raw
+
+            adj_sig, adj_conf, sent_reason = self.sentiment.get_signal_filter(
+                coin_symbol, signal, confidence
+            )
+            reasons.append(f"Sent:{sent_reason}")
+            signal = adj_sig
+            confidence = adj_conf
+
+            # If sentiment downgraded to HOLD, return HOLD
+            if signal == "HOLD":
+                return {
+                    "signal": "HOLD",
+                    "confidence": confidence,
+                    "reason": " | ".join(reasons),
+                    "current_price": ta.get('current_price', 0),
+                }
+
+        # Return the sentiment-filtered signal
+        if signal == "BUY":
+            return {
+                "signal": "BUY",
+                "confidence": confidence,
+                "sell_confidence": sell_score,
+                "reason": " | ".join(reasons),
+                "current_price": ta.get('current_price', 0),
+            }
+        else:  # SELL
+            return {
+                "signal": "SELL",
+                "confidence": confidence,
+                "buy_confidence": buy_score,
+                "reason": " | ".join(reasons),
                 "current_price": ta.get('current_price', 0),
             }
 
