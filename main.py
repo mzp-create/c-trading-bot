@@ -524,6 +524,9 @@ class TradingBot:
                 for _ in range(sleep_time):
                     if not self.running:
                         break
+                    # Quick Telegram command poll every ~5s
+                    if sleep_time > 10 and _ % 5 == 0:
+                        self._check_telegram_commands()
                     time.sleep(1)
 
             except Exception as e:
@@ -599,6 +602,17 @@ class TradingBot:
                 if df is not None:
                     self.ml_predictor.train(df, symbol=symbol)
                     self.log.info(f"[{symbol}] ML model retrained")
+
+    def _check_telegram_commands(self):
+        """Poll Telegram for slash commands and execute them."""
+        cmd = self.telegram.poll_commands()
+        if cmd is None:
+            return
+        response = self.telegram.execute_command(
+            cmd["cmd"], cmd["args"], cmd["chat_id"], bot=self
+        )
+        if response:
+            self.telegram.send(response)
 
     def _handle_shutdown(self, signum, frame):
         self.log.info("Shutdown signal received...")
