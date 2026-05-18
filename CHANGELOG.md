@@ -4,6 +4,58 @@ All notable changes to the trading bot project.
 
 ---
 
+## [1.6.0] — 2026-05-18
+
+### Added
+- **ETH/USDT & SOL/USDT ML Models** — XGBoost ensemble models trained on 1,000 candles each (~42 days of 1h data)
+  - ETH: 59.3% accuracy (270 samples, 132 up / 138 down)
+  - SOL: 61.5% accuracy (479 samples, 258 up / 221 down)
+  - Both saved to `data/models/{symbol}_ml_model.joblib`
+- **Sentiment Analysis Layer** (`analysis/sentiment.py`, 807 lines) — Layer 2 signal filter
+  - Live RSS feed fetchers for CoinTelegraph + CoinDesk (free, no API key required)
+  - 200+ bullish/bearish crypto keyword lexicon with weighted scoring
+  - 5-min result caching to reduce requests
+  - `get_signal_filter()` method: confirms BUY on positive news, blocks BUY on negative news
+  - Configurable filter strength (default: 0.30)
+- **Integration Guide** — `analysis/sentiment_integration.md` documenting upgrade paths:
+  - NewsAPI.org (100 free/day)
+  - Reddit OAuth (no API key needed)
+  - LLM scoring via DeepSeek ($0.0001/batch)
+- **Research Document** — `analysis/sentiment_research.md` with full evaluation of all approaches
+
+### Changed
+- `main.py` — Sentiment init in `TradingBot.__init__`, `_apply_sentiment_filter()` in `_combine_signals()`
+- `config/default.yaml` — New `sentiment:` section: `enabled`, `filter_strength`, `sources`
+- `monitoring/telegram_alerts.py` — Cycle summary alerts muted; only trade/error/daily alerts sent
+
+---
+
+## [1.5.0] — 2026-05-17
+
+### Added
+- **Market Regime Detector** (`risk/regime_detector.py`, 355 lines) — Identifies market state:
+  - Volatility ratio (recent vs historical std dev)
+  - Linear regression trend strength (R² + normalized slope)
+  - Trend consistency scoring (directional bar count)
+  - Returns: `TRENDING | RANGING | VOLATILE`
+- **Regime-Adaptive Risk Parameters** — Automatically adjusts SL/TP/sizing per regime:
+  - 📈 TRENDING: 1.2× SL, 1.5× TP, 1.0× position size
+  - 📊 RANGING: 0.8× SL, 0.7× TP, 0.8× position size
+  - 🌪️ VOLATILE: 1.5× SL, 1.0× TP, 0.5× position size
+- **Correlation-Aware Position Limits** — Prevents over-concentration on correlated assets (>0.7)
+- **Regime Emoji in Trade Alerts** — 📈/📊/🌪️ in Telegram trade notifications
+
+### Changed
+- `risk/manager.py` — `calculate_position_size()` now accepts `regime_position_mult`
+- `main.py` — Regime detection runs before each position sizing; correlation checked before new positions
+- `config/default.yaml` — New `regime_detector:` section with lookback, volatility thresholds, trend params
+
+### Fixed
+- **TA Flattening** — `_flatten_ta()` normalizes nested TA dicts to flat keys (`ema_9`, `rsi`, `bb_upper`, etc.)
+- **Regime Detector** — Handles lowercase column names from data collector
+
+---
+
 ## [1.4.0] — 2026-05-17
 
 ### Added
