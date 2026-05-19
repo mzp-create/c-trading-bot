@@ -428,25 +428,55 @@ class TelegramNotifier:
             return "⚠️ Sentiment analyzer not available"
 
         sent = bot.sentiment
-        # Force a fresh fetch
+        lines = ["📊 **Market Overview**"]
+
+        # --- Prices for each symbol ---
+        for s in bot.symbols:
+            sym = s["name"]
+            try:
+                price = bot.collector.get_current_price(sym)
+                if price:
+                    short = sym.split("/")[0]
+                    lines.append(f"\n{short}: **${price:,.0f}**")
+            except Exception:
+                pass
+
+        # --- Regime ---
+        if hasattr(bot, "regime_detector") and bot.regime_detector:
+            try:
+                reg = bot.regime_detector.current_regime
+                if reg:
+                    emoji = {"TRENDING": "📈", "RANGING": "📊", "VOLATILE": "🌪️"}.get(reg.name, "❓")
+                    lines.append(f"\nRegime: {emoji} {reg.name}")
+            except Exception:
+                pass
+
+        # --- Sentiment ---
         try:
-            result = sent.get_signal_filter(0.0, 1.0, 0.5)
+            result = sent.analyze("BTC")  # fetches all headlines, returns full sentiment
+            score = result.score
+            conf = result.confidence
+            headlines = result.sample_headlines or []
+            # Determine label from score
+            if score > 0.1:
+                label = "Bullish"
+            elif score < -0.1:
+                label = "Bearish"
+            else:
+                label = "Neutral"
         except Exception:
-            result = {"score": 0, "label": "Neutral", "headlines": []}
+            score, label, conf, headlines = 0.0, "Neutral", 0.0, []
 
-        score = result.get("score", 0)
-        label = result.get("label", "Neutral")
-        headlines = result.get("headlines", [])
+        lines.append(f"\n{'🟢' if score > 0.1 else '🔴' if score < -0.1 else '⚪'} **Sentiment**: {score:+.3f} ({label}) — conf: {conf:.2f}")
 
-        emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
-        lines = [
-            f"{emoji} **Sentiment Overview**",
-            f"Score: {score:+.3f} ({label})",
-        ]
         if headlines:
             lines.append(f"\nLatest headlines ({len(headlines)} total):")
             for h in headlines[:5]:
-                lines.append(f"  • {h[:80]}")
+                lines.append(f"  • {h[:100]}")
+        else:
+            if not headlines:
+                lines.append("\nNo recent news headlines.")
+
         return "\n".join(lines)
 
     @staticmethod
