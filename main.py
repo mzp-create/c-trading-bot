@@ -564,8 +564,8 @@ class TradingBot:
                 for _ in range(sleep_time):
                     if not self.running:
                         break
-                    # Poll Telegram commands once per cycle (P2-12 fix: was every 5s)
-                    if _ == 0:
+                    # Poll Telegram commands every 10s for responsive /commands
+                    if _ % 10 == 0:
                         self._check_telegram_commands()
                     time.sleep(1)
 

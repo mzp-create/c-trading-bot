@@ -157,7 +157,7 @@ class TelegramNotifier:
                 f"{self.base_url}/getUpdates",
                 params={
                     "offset": self._last_update_id + 1,
-                    "timeout": 5,
+                    "timeout": 0,  # short poll — check once, don't long-wait
                     "allowed_updates": ["message"],
                 },
                 timeout=10,
