@@ -28,6 +28,8 @@ class TelegramNotifier:
 
         self._last_update_id = 0
         self._current_chat_id = None
+        self._last_command_time = 0.0
+        self._last_command_text = ""
 
         if self.enabled:
             self.log.info("Telegram notifications enabled")
@@ -184,6 +186,14 @@ class TelegramNotifier:
                 if chat_id != self.chat_id:
                     self.log.debug(f"Ignoring command from unauthorized chat: {chat_id}")
                     continue
+                # Deduplication: skip if same command text processed within 5 seconds
+                import time as _time
+                now = _time.time()
+                if text == self._last_command_text and (now - self._last_command_time) < 5.0:
+                    self.log.debug(f"Skipping duplicate command: {text}")
+                    continue
+                self._last_command_text = text
+                self._last_command_time = now
                 parts = text.split(maxsplit=1)
                 cmd = parts[0].lower()
                 args = parts[1] if len(parts) > 1 else ""

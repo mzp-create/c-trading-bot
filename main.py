@@ -661,6 +661,7 @@ class TradingBot:
         )
         if response:
             self.telegram._send_to_chat(cmd["chat_id"], response)
+            self.log.info(f"Telegram command processed: {cmd['cmd']}")
 
     def _handle_shutdown(self, signum, frame):
         self.log.info("Shutdown signal received...")
