@@ -4,6 +4,34 @@ All notable changes to the trading bot project.
 
 ---
 
+## [1.7.0] — 2026-05-19
+
+### Added
+- **LLM Market Reviewer Layer** (`analysis/llm_reviewer.py`) — Layer 3 expert overlay
+  - Veteran crypto trader system prompt with 12+ years of market knowledge spanning cycles
+  - Knowledge base covers: market regimes, volume/liquidity dynamics, sentiment positioning, TA context by regime, ML calibration, multi-pair dynamics
+  - Fires only on BUY/SELL signals with confidence < 0.55 (grey zone)
+  - Rate-limited to 1 call per 120s to DeepSeek-chat API
+  - Can: CONFIRM (boost confidence), SKIP (downgrade to HOLD), or BUY/SELL (override)
+  - Rich market data sent: RSI, ADX, MACD, volume ratio, 24h change, all strategy+ML signals, sentiment score
+  - JSON-structured output with 1-sentence trader reasoning
+- **DeepSeek API Key** — Added `DEEPSEEK_API_KEY` to bot's `.env` for LLM access
+
+### Changed
+- `main.py` — `LLMReviewer` init in `TradingBot.__init__`, Layer 3 integration in `_combine_signals()` after sentiment filter
+- `analysis/sentiment.py` — `get_signal_filter()` now stores `_last_score` and `_last_label` for downstream consumption
+- `analysis/llm_reviewer.py` — Enhanced prompt with RSI, ADX, MACD histogram, volume ratio, 24h price change data
+
+### Fixed
+- **Telegram command double-reply** — `_check_telegram_commands()` now uses `_send_to_chat(cmd["chat_id"], response)` instead of `send(response)` to avoid routing to home channel
+- **Telegram `_last_update_id` class/instance confusion** — Both `_last_update_id` and `_current_chat_id` properly initialized as instance vars in `__init__()` instead of class-level annotations
+- **Telegram `name 'datetime' is not defined`** — Added `from datetime import datetime` inside `_cmd_status` staticmethod
+- **Telegram `name 'json' is not defined`** — Added `import json` at module top
+- **Telegram markdown parse errors** — Emoji placement no longer breaks `**bold**` markers
+- **Stale `.pyc` cache** — Documented `__pycache__` clearing requirement in skill references
+
+---
+
 ## [1.6.0] — 2026-05-18
 
 ### Added
