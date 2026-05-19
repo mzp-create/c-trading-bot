@@ -9,6 +9,7 @@ from analysis.ml_predictor import MLPredictor
 from strategies.selector import StrategySelector
 from risk.regime_detector import MarketRegimeDetector, MarketRegime
 from risk.manager import RiskManager
+from analysis.utils import flatten_ta
 
 config = load_config("config/default.yaml")
 
@@ -46,37 +47,7 @@ for sym in symbols:
     ta_1h = analyzer.analyze(df_1h, "1h")
     ta_5m = analyzer.analyze(df_5m, "5m")
 
-    # Normalize TA keys: flatten nested dicts into flat keys
-    def flatten_ta(ta_dict):
-        flat = {"current_price": ta_dict.get("current_price", 0), "close": ta_dict.get("current_price", 0)}
-        # Add indicators directly
-        ind = ta_dict.get("indicators", {})
-        for k, v in ind.items():
-            flat[k] = v
-        # Also add top-level keys for backward compat
-        for k in ["rsi", "ema_9", "ema_21", "volume", "signal", "confidence"]:
-            if k in ta_dict:
-                flat[k] = ta_dict[k]
-        # Volume avg
-        vp = ta_dict.get("volume_profile", {})
-        flat["volume_sma"] = vp.get("sma", 0)
-        flat["volume_avg"] = vp.get("sma", 0)
-        # Bollinger
-        bb = ta_dict.get("bollinger", {})
-        flat["bb_upper"] = bb.get("upper", 0)
-        flat["bb_lower"] = bb.get("lower", 0)
-        flat["bb_mid"] = bb.get("middle", 0)
-        flat["bb_ma"] = bb.get("middle", 0)
-        # MACD
-        macd = ta_dict.get("macd", {})
-        flat["macd"] = macd.get("value", 0)
-        flat["macd_histogram"] = macd.get("histogram", 0)
-        flat["macd_hist"] = macd.get("histogram", 0)
-        flat["macd_signal"] = macd.get("signal", 0)
-        # ATR
-        flat["atr"] = ind.get("atr", 0)
-        return flat
-
+    # Normalize TA keys: flatten nested dicts into flat keys (shared utility)
     ta_1h_flat = flatten_ta(ta_1h)
     ta_5m_flat = flatten_ta(ta_5m)
     ml_signal = ml.predict(df_1h, symbol=sym)

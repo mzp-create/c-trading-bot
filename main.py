@@ -19,7 +19,7 @@ import yaml
 import logging
 import signal
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, List
 
 # Add project root to path
@@ -60,6 +60,7 @@ from risk.manager import RiskManager
 from risk.regime_detector import MarketRegimeDetector, MarketRegime
 from analysis.sentiment import SentimentAnalyzer
 from analysis.llm_reviewer import LLMReviewer
+from analysis.utils import flatten_ta
 from execution.engine import ExecutionEngine
 from monitoring.logger import BotLogger
 from monitoring.telegram_alerts import TelegramNotifier
@@ -78,6 +79,8 @@ class TradingBot:
         self.daily_pnl = 0.0
         self.trade_count = 0
         self.consecutive_losses = 0
+        self._last_reset_date: Optional[date] = None
+        self._cached_1h_dfs: Dict[str, Optional[pd.DataFrame]] = {}
 
         # Initialize components
         self.logger = BotLogger(self.config)
@@ -122,57 +125,15 @@ class TradingBot:
         self.log.info(f"⚙️  Max Positions: {self.config.get('trading', {}).get('max_open_positions', 6)}")
 
     def _flatten_ta(self, ta_dict: dict) -> dict:
-        """Flatten nested TA dict into flat keys that strategies expect."""
-        flat = {
-            "current_price": ta_dict.get("current_price", 0),
-            "close": ta_dict.get("current_price", 0),
-            "signal": ta_dict.get("signal", "HOLD"),
-            "confidence": ta_dict.get("confidence", 0.0),
-            "trend": ta_dict.get("trend", "neutral"),
-        }
-        # Indicators sub-dict (most important)
-        ind = ta_dict.get("indicators", {})
-        for k, v in ind.items():
-            flat[k] = v
-        # Top-level TA values
-        for k in ["rsi", "ema_9", "ema_21"]:
-            if k in ta_dict:
-                flat[k] = ta_dict[k]
-        # Volume
-        vp = ta_dict.get("volume_profile", {})
-        flat["volume"] = vp.get("current", ind.get("volume", 0))
-        flat["volume_sma"] = vp.get("sma", ind.get("volume_sma", 0))
-        flat["volume_avg"] = flat["volume_sma"]
-        # Bollinger
-        bb = ta_dict.get("bollinger", {})
-        flat["bb_upper"] = bb.get("upper", ind.get("bb_upper", 0))
-        flat["bb_lower"] = bb.get("lower", ind.get("bb_lower", 0))
-        flat["bb_mid"] = bb.get("middle", ind.get("bb_middle", 0))
-        flat["bb_ma"] = flat["bb_mid"]
-        flat["bb_position"] = bb.get("position", 0)
-        # MACD
-        macd = ta_dict.get("macd", {})
-        flat["macd"] = macd.get("value", ind.get("macd", 0))
-        flat["macd_histogram"] = macd.get("histogram", ind.get("macd_histogram", 0))
-        flat["macd_hist"] = flat["macd_histogram"]
-        flat["macd_histogram_prev"] = macd.get("histogram_prev", ind.get("macd_histogram_prev", flat["macd_hist"]))
-        flat["macd_hist_prev"] = flat["macd_histogram_prev"]
-        flat["macd_signal"] = macd.get("signal", ind.get("macd_signal", 0))
-        # ATR / vol
-        flat["atr"] = ind.get("atr", 0)
-        bb_u = flat.get("bb_upper", 0)
-        bb_l = flat.get("bb_lower", 0)
-        flat["bb_width"] = bb_u - bb_l if bb_u and bb_l else 0
-        # bb_prev_width — estimate from second-to-last candle if possible
-        bb_prev_u = ind.get("bb_upper_prev", 0) or flat["bb_upper"]
-        bb_prev_l = ind.get("bb_lower_prev", 0) or flat["bb_lower"]
-        flat["bb_prev_width"] = bb_prev_u - bb_prev_l if bb_prev_u and bb_prev_l else flat["bb_width"]
-        return flat
+        """Flatten nested TA dict — delegates to shared utility."""
+        return flatten_ta(ta_dict)
 
     def analyze_market(self, symbol: str = "BTC/USDT", exchange_symbol: str = None) -> Dict[str, Any]:
         """Analyze market data and return trading signals for a given symbol."""
         # 1. Get fresh market data
         df_1h = self.collector.get_ohlcv(symbol, timeframe="1h", limit=200)
+        # Cache for reuse by regime detection (P2-13)
+        self._cached_1h_dfs[symbol] = df_1h
         df_5m = self.collector.get_ohlcv(symbol, timeframe="5m", limit=200)
         df_15m = self.collector.get_ohlcv(symbol, timeframe="15m", limit=200)
 
@@ -228,8 +189,16 @@ class TradingBot:
                 sell_score += w * sig['confidence']
                 reasons.append(f"{sig['name']}:SELL({sig['confidence']:.2f})")
 
-        # Add ML signal
+        # Add ML signal — weight based on model accuracy (P2-14)
         ml_weight = 0.3
+        try:
+            sym = ml_signal.get("symbol", "")
+            if sym:
+                acc = self.ml_predictor._training_accuracies.get(sym, 0.55)
+                if acc > 0.5:
+                    ml_weight = min(0.4, max(0.1, acc - 0.4))
+        except Exception:
+            pass
         if ml_signal['signal'] == 'BUY':
             buy_score += ml_weight * ml_signal['confidence']
             reasons.append(f"ML:BUY({ml_signal['confidence']:.2f})")
@@ -400,14 +369,16 @@ class TradingBot:
                 self.log.info(f"[{symbol}] HOLD — {decision['reason']}")
                 return decision
 
-            # Get fresh market data for regime detection
+            # Get fresh market data for regime detection (reuse cached 1h when possible — P2-13)
             regime = MarketRegime.RANGING
             regime_params = None
             try:
-                df_regime = self.collector.get_ohlcv(
-                    symbol, timeframe="1h",
-                    limit=self.config.get('regime_detector', {}).get('lookback', 50) + 20
-                )
+                df_regime = self._cached_1h_dfs.get(symbol)
+                if df_regime is None or len(df_regime) < 30:
+                    df_regime = self.collector.get_ohlcv(
+                        symbol, timeframe="1h",
+                        limit=self.config.get('regime_detector', {}).get('lookback', 50) + 20
+                    )
                 if df_regime is not None and len(df_regime) > 30:
                     regime = self.regime_detector.detect(df_regime)
                     base_sl = float(self.config.get('risk', {}).get('stop_loss_pct', 2.0))
@@ -440,6 +411,10 @@ class TradingBot:
                             f"[{symbol}] Skipping — too correlated "
                             f"(corr={corr_val:.2f}, limit={max_corr})"
                         )
+                        # Return HOLD so cycle summary doesn't show false BUY/SELL (P1-8)
+                        decision["signal"] = "HOLD"
+                        decision["confidence"] = 0.0
+                        decision["reason"] += f" | CorrBlocked({corr_val:.2f})"
                         return decision
 
             # Get position size
@@ -589,8 +564,8 @@ class TradingBot:
                 for _ in range(sleep_time):
                     if not self.running:
                         break
-                    # Quick Telegram command poll every ~5s
-                    if sleep_time > 10 and _ % 5 == 0:
+                    # Poll Telegram commands once per cycle (P2-12 fix: was every 5s)
+                    if _ == 0:
                         self._check_telegram_commands()
                     time.sleep(1)
 
@@ -626,29 +601,37 @@ class TradingBot:
                     self.telegram.send(msg)
                     self.log.info(f"[{symbol}] Position closed: {updated}")
 
+                    # Remove position from executor so it doesn't accumulate forever (P1-6)
+                    try:
+                        self.executor.open_positions.remove(pos)
+                    except (ValueError, AttributeError):
+                        self.log.warning(f"[{symbol}] Position already removed from list")
+
         # Daily summary
         open_count = len(self.executor.open_positions)
         self.log.info(f"Daily PnL: ${self.daily_pnl:.2f} | Open: {open_count} | "
                      f"Trades: {self.trade_count}")
 
     def _check_daily_reset(self):
-        """Reset daily counters."""
-        now = datetime.now()
-        if now.hour == 0 and now.minute == 0:
+        """Reset daily counters using date comparison (P1-9)."""
+        today = datetime.now().date()
+        if self._last_reset_date is None or today > self._last_reset_date:
             # Send daily summary before reset
-            symbols_str = ', '.join([s['name'] for s in self.symbols])
-            msg = (f"📊 **Daily Summary**\n"
-                   f"Date: {(now - timedelta(days=1)).strftime('%Y-%m-%d')}\n"
-                   f"Pairs: {symbols_str}\n"
-                   f"PnL: ${self.daily_pnl:.2f}\n"
-                   f"Trades: {self.trade_count}\n"
-                   f"Open: {len(self.executor.open_positions)}")
-            self.telegram.send(msg)
+            if self._last_reset_date is not None:
+                symbols_str = ', '.join([s['name'] for s in self.symbols])
+                msg = (f"📊 **Daily Summary**\n"
+                       f"Date: {self._last_reset_date.isoformat()}\n"
+                       f"Pairs: {symbols_str}\n"
+                       f"PnL: ${self.daily_pnl:.2f}\n"
+                       f"Trades: {self.trade_count}\n"
+                       f"Open: {len(self.executor.open_positions)}")
+                self.telegram.send(msg)
 
             self.daily_pnl = 0.0
             self.trade_count = 0
             self.consecutive_losses = 0
-            self.log.info("Daily counters reset")
+            self._last_reset_date = today
+            self.log.info(f"Daily counters reset ({today.isoformat()})")
 
     def _maybe_retrain_ml(self):
         """Retrain ML models for all symbols if enough new data."""

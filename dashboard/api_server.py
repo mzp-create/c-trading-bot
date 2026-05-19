@@ -40,7 +40,7 @@ STATIC_DIR = HERE / "static"
 # ---------------------------------------------------------------------------
 # Password auth — random password generated at startup
 # ---------------------------------------------------------------------------
-DASHBOARD_PASSWORD = secrets.token_hex(6)  # 12-char random password
+DASHBOARD_PASSWORD = secrets.token_urlsafe(24)  # 192-bit random password (P3-19)
 PASSWORD_FILE = HERE / ".dashboard_password"
 with open(PASSWORD_FILE, "w") as f:
     f.write(f"DASHBOARD_PASSWORD={DASHBOARD_PASSWORD}\n")
@@ -287,13 +287,13 @@ def verify_password(credentials: HTTPBasicCredentials = Depends(security)):
     return True
 
 
-# CORS
+# CORS — restrict to localhost only (P3-20)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["http://localhost:8999", "http://127.0.0.1:8999"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # Mount static files (for index.html and any other assets)
@@ -518,4 +518,4 @@ def serve_dashboard(auth: bool = Depends(verify_password)):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8999)
+    uvicorn.run(app, host="127.0.0.1", port=8999)

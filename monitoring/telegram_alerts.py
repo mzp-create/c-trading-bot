@@ -144,6 +144,8 @@ class TelegramNotifier:
         Returns the first pending command as a dict:
             {'cmd': '/status', 'args': '', 'chat_id': '123'}
         or None if no commands found.
+
+        Only processes commands from the configured chat_id (P2-11 whitelist).
         """
         if not self.enabled:
             return None
@@ -154,7 +156,7 @@ class TelegramNotifier:
                 params={
                     "offset": self._last_update_id + 1,
                     "timeout": 5,
-                    "allowed_updates": json.dumps(["message"]),
+                    "allowed_updates": ["message"],
                 },
                 timeout=10,
             )
@@ -178,6 +180,10 @@ class TelegramNotifier:
             chat_id = str(msg.get("chat", {}).get("id", ""))
 
             if text.startswith("/"):
+                # Whitelist check: only process commands from configured chat_id (P2-11)
+                if chat_id != self.chat_id:
+                    self.log.debug(f"Ignoring command from unauthorized chat: {chat_id}")
+                    continue
                 parts = text.split(maxsplit=1)
                 cmd = parts[0].lower()
                 args = parts[1] if len(parts) > 1 else ""

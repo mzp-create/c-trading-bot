@@ -29,7 +29,9 @@ import math
 import logging
 import random
 from pathlib import Path
+from collections import deque, defaultdict
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Optional, List, Dict, Any
 from copy import deepcopy
 
@@ -73,8 +75,8 @@ class ExecutionEngine:
 
         # --- Internal state ---
         self._open_positions: List[Dict[str, Any]] = []
-        self._order_history: List[Dict[str, Any]] = []
-        self._trade_history: List[Dict[str, Any]] = []
+        self._order_history: deque = deque(maxlen=1000)  # bounded to prevent memory leak (P2-16)
+        self._trade_history: deque = deque(maxlen=1000)  # bounded to prevent memory leak (P2-16)
         self._next_order_id: int = 1
 
         # Paper-only state
@@ -516,7 +518,7 @@ class ExecutionEngine:
 
         # --- No opposing position: check balance ---
         if side == "buy":
-            needed_quote = cost
+            needed_quote = cost + fee  # Include fee in availability check (P1-7)
             available = self._paper_balance.get(quote, {}).get("free", 0.0)
             if needed_quote > available:
                 return {
@@ -738,23 +740,37 @@ class ExecutionEngine:
         }
 
     def _get_live_positions(self) -> List[Dict[str, Any]]:
-        """Fetch current positions from the exchange."""
+        """Fetch current positions from the exchange for ALL configured symbols (P1-10)."""
         if not self._client:
             return []
         try:
-            symbol = self.trading_config.get("symbol", "BTC/USDT")
-            pos = self._client.fetch_position(symbol)
-            contracts = float(pos.get("contracts", 0))
-            if contracts == 0:
-                return []
-            side = "buy" if contracts > 0 else "sell"
-            return [{
-                "symbol": symbol,
-                "side": side,
-                "amount": abs(contracts),
-                "entry_price": float(pos.get("entryPrice", 0)),
-                "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
-            }]
+            symbols_config = self.trading_config.get("symbols", [])
+            if not symbols_config:
+                symbols_config = [{"name": self.trading_config.get("symbol", "BTC/USDT"),
+                                   "symbol": "tBTCUST"}]
+
+            positions = []
+            for sym_config in symbols_config:
+                exchange_symbol = sym_config.get("symbol", "")
+                name = sym_config.get("name", exchange_symbol)
+                if not exchange_symbol:
+                    continue
+                try:
+                    pos = self._client.fetch_position(exchange_symbol)
+                    contracts = float(pos.get("contracts", 0))
+                    if contracts == 0:
+                        continue
+                    side = "buy" if contracts > 0 else "sell"
+                    positions.append({
+                        "symbol": name,
+                        "side": side,
+                        "amount": abs(contracts),
+                        "entry_price": float(pos.get("entryPrice", 0)),
+                        "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
+                    })
+                except Exception as sym_exc:
+                    self._log.warning("Failed to fetch position for %s: %s", exchange_symbol, sym_exc)
+            return positions
         except Exception as exc:
             self._log.error("Failed to fetch live positions: %s", exc)
             return []
