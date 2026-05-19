@@ -26,6 +26,9 @@ class TelegramNotifier:
         self.enabled = bool(self.bot_token and self.chat_id)
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}" if self.enabled else ""
 
+        self._last_update_id = 0
+        self._current_chat_id = None
+
         if self.enabled:
             self.log.info("Telegram notifications enabled")
         else:
@@ -134,7 +137,6 @@ class TelegramNotifier:
         return self.send("\n".join(lines))
 
     # ── Command handling (getUpdates polling) ─────────────────────────────
-    _last_update_id: int = 0
 
     def poll_commands(self) -> Optional[dict]:
         """Quick poll for a single Telegram command (non-blocking).
@@ -234,18 +236,23 @@ class TelegramNotifier:
             self._current_chat_id = None
 
     # ── stored for reply routing ──────────────────────────────────────────
-    _current_chat_id: Optional[str] = None
 
     def reply(self, text: str) -> bool:
         """Send a reply back to the chat that issued the last command."""
         cid = self._current_chat_id
         if not cid or not self.enabled:
             return False
+        return self._send_to_chat(cid, text)
+
+    def _send_to_chat(self, chat_id: str, text: str) -> bool:
+        """Send a message to a specific chat_id."""
+        if not self.enabled:
+            return False
         try:
             resp = requests.post(
                 f"{self.base_url}/sendMessage",
                 json={
-                    "chat_id": cid,
+                    "chat_id": chat_id,
                     "text": text,
                     "parse_mode": "Markdown",
                     "disable_web_page_preview": True,
@@ -275,6 +282,7 @@ class TelegramNotifier:
 
     @staticmethod
     def _cmd_status(_args: str, bot: "TradingBot") -> str:  # noqa: F821
+        from datetime import datetime
         uptime = ""
         if bot.start_time:
             elapsed = int(
@@ -314,7 +322,7 @@ class TelegramNotifier:
     @staticmethod
     def _cmd_balance(_args: str, bot: "TradingBot") -> str:  # noqa: F821
         try:
-            raw = bot.collector.client.fetch_balance({"type": "margin"})
+            raw = bot.collector.client.fetch_balance()
             free = raw.get("free", {})
             total = raw.get("total", {})
             lines = ["💰 **Wallet Balance (Margin)**"]
@@ -427,7 +435,6 @@ class TelegramNotifier:
 
     @staticmethod
     def _cmd_retrain(_args: str, bot: "TradingBot") -> str:  # noqa: F821
-        import threading
 
         results = []
 

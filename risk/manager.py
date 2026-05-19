@@ -303,19 +303,17 @@ class RiskManager:
                 stop_distance = current_price * (distance_pct / 100.0)
                 return round(current_price - stop_distance, 8)
             else:
-                # Not yet activated — use fixed stop-loss
-                return float(
-                    config.get("stop_loss_pct", 2.0)
-                )
+                # Not yet activated — use fixed stop-loss (convert % to price)
+                sl_pct = float(config.get("stop_loss_pct", 2.0))
+                return round(entry_price * (1.0 - sl_pct / 100.0), 8)
         else:  # sell / short
             pnl_pct = (entry_price - current_price) / entry_price * 100.0
             if pnl_pct >= activation_pct:
                 stop_distance = current_price * (distance_pct / 100.0)
                 return round(current_price + stop_distance, 8)
             else:
-                return float(
-                    config.get("stop_loss_pct", 2.0)
-                )
+                sl_pct = float(config.get("stop_loss_pct", 2.0))
+                return round(entry_price * (1.0 + sl_pct / 100.0), 8)
 
     def get_dynamic_interval(self) -> int:
         """Return sleep interval in seconds based on market volatility.

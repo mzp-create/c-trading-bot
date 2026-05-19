@@ -285,6 +285,11 @@ class MarketRegimeDetector:
         """Return the most recently detected regime."""
         return self._last_regime
 
+    @property
+    def current_regime(self) -> Optional[MarketRegime]:
+        """Property alias for get_last_regime()."""
+        return self._last_regime
+
     # ── helpers ───────────────────────────────────────────────────────────
 
     def _pct_change(self, arr) -> list:

@@ -676,6 +676,8 @@ class SentimentAnalyzer:
         Returns (adjusted_signal, adjusted_confidence, reason_string).
         """
         sentiment = self.analyze(symbol)
+        self._last_score = sentiment.score
+        self._last_label = sentiment.label or "Neutral"
 
         if sentiment.error:
             # Can't confirm — reduce confidence but don't block completely

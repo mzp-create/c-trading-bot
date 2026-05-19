@@ -59,6 +59,7 @@ from strategies.selector import StrategySelector
 from risk.manager import RiskManager
 from risk.regime_detector import MarketRegimeDetector, MarketRegime
 from analysis.sentiment import SentimentAnalyzer
+from analysis.llm_reviewer import LLMReviewer
 from execution.engine import ExecutionEngine
 from monitoring.logger import BotLogger
 from monitoring.telegram_alerts import TelegramNotifier
@@ -88,6 +89,7 @@ class TradingBot:
         self.risk = RiskManager(self.config)
         self.regime_detector = MarketRegimeDetector(self.config)
         self.sentiment = SentimentAnalyzer(self.config)
+        self.llm_reviewer = LLMReviewer(self.config)
         self.executor = ExecutionEngine(self.config, mode=mode)
 
         self.log = self.logger.get_logger("Bot")
@@ -259,16 +261,19 @@ class TradingBot:
             }
 
         # Layer 2: Sentiment confirmation (applied only to BUY/SELL signals)
+        sent_score = 0.0
+        sent_label = "Neutral"
         if self.config.get("sentiment", {}).get("enabled", False):
             symbol_raw = ta.get("symbol", ta.get("close_symbol", ""))
             if not symbol_raw:
-                # Try to extract from context — fall back to BTC
                 symbol_raw = "BTC"
             coin_symbol = symbol_raw.split("/")[0] if "/" in symbol_raw else symbol_raw
 
             adj_sig, adj_conf, sent_reason = self.sentiment.get_signal_filter(
                 coin_symbol, signal, confidence
             )
+            sent_score = self.sentiment._last_score if hasattr(self.sentiment, '_last_score') else 0.0
+            sent_label = self.sentiment._last_label if hasattr(self.sentiment, '_last_label') else "Neutral"
             reasons.append(f"Sent:{sent_reason}")
             signal = adj_sig
             confidence = adj_conf
@@ -281,6 +286,66 @@ class TradingBot:
                     "reason": " | ".join(reasons),
                     "current_price": ta.get('current_price', 0),
                 }
+
+        # Layer 3: LLM review (only for BUY/SELL signals below high-confidence threshold)
+        if signal in ("BUY", "SELL") and hasattr(self, 'llm_reviewer'):
+            try:
+                # Get TA details for the prompt
+                rsi = float(ta.get('rsi', 50))
+                adx = float(ta.get('adx', 20))
+                macd_hist = float(ta.get('macd_histogram', ta.get('macd_hist', 0)))
+                vol_ratio = float(ta.get('volume_ratio', 1.0))
+                price_change = float(ta.get('price_change_24h', 0))
+                regime_str = "UNKNOWN"
+                if hasattr(self, 'regime_detector') and self.regime_detector:
+                    try:
+                        regime_str = self.regime_detector.current_regime.value if self.regime_detector.current_regime else "RANGING"
+                    except:
+                        regime_str = "RANGING"
+
+                llm_result = self.llm_reviewer.review_signal(
+                    symbol=ta.get('symbol', symbol_raw),
+                    combined_signal=signal,
+                    combined_confidence=confidence,
+                    strategies=strategy_signals,
+                    ml_signal=ml_signal,
+                    sentiment_score=sent_score,
+                    sentiment_label=sent_label,
+                    regime=regime_str,
+                    price=ta.get('current_price', 0),
+                    daily_pnl=self.daily_pnl,
+                    price_change_24h=price_change,
+                    volume_ratio=vol_ratio,
+                    rsi=rsi,
+                    adx=adx,
+                    macd_hist=macd_hist,
+                )
+
+                if llm_result.get("llm_called", False):
+                    llm_action = llm_result.get("action", "HOLD")
+                    llm_conf = llm_result.get("confidence", 0.0)
+                    llm_reason = llm_result.get("reason", "")
+                    reasons.append(f"LLM:{llm_action}({llm_conf:.2f})")
+                    
+                    # If LLM says SKIP, downgrade to HOLD
+                    if llm_action in ("SKIP", "HOLD") and llm_action != signal:
+                        self.log.info(f"LLM overrode {signal} -> {llm_action}: {llm_reason}")
+                        return {
+                            "signal": "HOLD",
+                            "confidence": confidence * 0.8,
+                            "reason": " | ".join(reasons),
+                            "current_price": ta.get('current_price', 0),
+                        }
+                    # If LLM says CONFIRM or BUY/SELL matching signal, keep it and adjust confidence
+                    if llm_action == "CONFIRM" or llm_action == signal:
+                        confidence = max(confidence, llm_conf)
+                        self.log.info(f"LLM confirmed {signal}: {llm_reason}")
+                    # If LLM says opposite direction, flag it but don't override
+                    elif llm_action in ("BUY", "SELL") and llm_action != signal:
+                        confidence = min(confidence, llm_conf)
+                        self.log.info(f"LLM diverges from {signal}: {llm_reason}")
+            except Exception as e:
+                self.log.warning(f"LLM review error: {e}")
 
         # Return the sentiment-filtered signal
         if signal == "BUY":
@@ -612,7 +677,7 @@ class TradingBot:
             cmd["cmd"], cmd["args"], cmd["chat_id"], bot=self
         )
         if response:
-            self.telegram.send(response)
+            self.telegram._send_to_chat(cmd["chat_id"], response)
 
     def _handle_shutdown(self, signum, frame):
         self.log.info("Shutdown signal received...")
