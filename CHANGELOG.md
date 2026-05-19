@@ -2,6 +2,36 @@
 
 All notable changes to the trading bot project.
 
+## [1.8.0] — 2026-05-19
+
+### Added
+- **Shared TA Utility** (`analysis/utils.py`) — `flatten_ta()` extracted to reusable module
+- **Telegram Command Deduplication** — 5-second cooldown window prevents double-processing
+
+### Changed
+- **Telegram `/sentiment` command enhanced** — Now shows full market overview:
+  - Live BTC/ETH/SOL prices from exchange
+  - Market regime (trending/ranging/volatile with emoji)
+  - Sentiment score with bullish/bearish/neutral label + confidence
+  - Uses `sentiment.analyze()` directly for correct headline data
+- **Telegram polling** — Switched from once-per-cycle to every 10s during sleep
+- **Telegram `getUpdates`** — Changed from 5s long-poll to short-poll (timeout: 0) so polling doesn't block the sleep loop
+- **Telegram Chat Whitelist** — `/commands` only processed from configured `chat_id`
+- **ML Weight Dynamic** — Computed from model accuracy (`min(0.4, max(0.1, acc - 0.4))`) instead of hardcoded 0.3
+- **OHLCV 1h Cached** — Regime detection reuses `analyze_market()` cached 1h data instead of duplicate fetch
+- **Dashboard Security** — Password upgraded to `token_urlsafe(24)` (192 bits), CORS restricted to localhost, binding changed to `127.0.0.1`
+
+### Fixed
+- **P1-6: SL/TP never removes closed positions** — `_check_positions()` now calls `executor.open_positions.remove(pos)` after close (positions accumulated forever in paper mode)
+- **P1-7: Fee not in balance check** — Paper buy orders now check `cost + fee <= available` instead of just `cost`
+- **P1-8: Correlation-blocked trades reported as false BUY/SELL** — Returns HOLD with `CorrBlocked` reason appended, so cycle summary shows accurate signal
+- **P1-9: Daily PnL reset missed on sleep** — Switched from exact midnight check to `_last_reset_date` comparison (never misses a day)
+- **P1-10: Live positions only fetch BTC** — `_get_live_positions()` now loops all configured symbols (BTC, ETH, SOL)
+- **P2-12: Telegram polling every 5s was wasteful** — ~18K HTTP calls/day reduced to ~6K (every 10s)
+- **P2-16: Unbounded history lists** — `_order_history` / `_trade_history` switched to `deque(maxlen=1000)` to prevent memory leak
+- **Multiple bot instances** — `pkill -9` cleanup of 4 concurrent processes causing double command responses
+- **Telegram `allowed_updates`** — Passes list directly instead of `json.dumps()` JSON string
+
 ---
 
 ## [1.7.0] — 2026-05-19
