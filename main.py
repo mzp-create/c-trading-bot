@@ -16,6 +16,7 @@ import time
 import json
 import re
 import yaml
+import pandas as pd
 import logging
 import signal
 from pathlib import Path
@@ -190,13 +191,18 @@ class TradingBot:
                 reasons.append(f"{sig['name']}:SELL({sig['confidence']:.2f})")
 
         # Add ML signal — weight based on model accuracy (P2-14)
-        ml_weight = 0.3
+        # Base higher when ML confidence is strong
+        ml_weight = 0.35
         try:
             sym = ml_signal.get("symbol", "")
+            ml_conf = ml_signal.get("confidence", 0.0)
             if sym:
                 acc = self.ml_predictor._training_accuracies.get(sym, 0.55)
                 if acc > 0.5:
-                    ml_weight = min(0.4, max(0.1, acc - 0.4))
+                    ml_weight = min(0.5, max(0.2, acc - 0.35))
+            # Boost ML weight if ML is very confident (>0.70)
+            if ml_conf > 0.70:
+                ml_weight = min(0.5, ml_weight + 0.10)
         except Exception:
             pass
         if ml_signal['signal'] == 'BUY':
@@ -214,7 +220,7 @@ class TradingBot:
             sell_score /= total_weight
 
         # Decision
-        confidence_threshold = 0.50
+        confidence_threshold = 0.30
         if buy_score > sell_score and buy_score > confidence_threshold:
             signal = "BUY"
             confidence = buy_score
@@ -420,7 +426,9 @@ class TradingBot:
             # Get position size
             price = decision['current_price']
             if price <= 0:
-                return
+                decision["signal"] = "HOLD"
+                decision["reason"] += " | InvalidPrice"
+                return decision
 
             # Risk-adjusted position sizing — use pair's allocated capital
             effective_capital = pair_capital + (self.daily_pnl / max(len(self.symbols), 1))
@@ -438,7 +446,18 @@ class TradingBot:
 
             if position_size <= 0:
                 self.log.info(f"[{symbol}] Position size too small, skipping trade")
-                return
+                decision["signal"] = "HOLD"
+                decision["reason"] += " | PositionTooSmall"
+                return decision
+
+            # Enforce exchange minimum order sizes
+            symbol_base = symbol.split("/")[0]
+            exchange_min_sizes = {"SOL": 0.02, "BTC": 0.0001, "ETH": 0.001}
+            min_size = exchange_min_sizes.get(symbol_base, 0.0001)
+            if position_size < min_size:
+                self.log.info(f"[{symbol}] Position size {position_size:.6f} below minimum {min_size}, "
+                             f"scaling up to minimum")
+                position_size = min_size
 
             # Determine regime-adjusted SL/TP
             stop_loss_pct = (
@@ -533,6 +552,8 @@ class TradingBot:
                 self._check_daily_reset()
 
                 # Trade cycle for EACH symbol
+                # Refresh position cache once per cycle before anything reads it
+                self.executor._update_position_cache()
                 cycle_results = []
                 for s in self.symbols:
                     result = self.execute_trade_cycle(symbol_config=s)
@@ -543,11 +564,21 @@ class TradingBot:
 
                 # Send cycle summary to Telegram (every cycle)
                 if cycle_results:
+                    # Get current regime
+                    regime_str = ""
+                    if hasattr(self, "regime_detector") and self.regime_detector:
+                        try:
+                            reg = self.regime_detector.current_regime
+                            regime_str = reg.name if reg else ""
+                        except Exception:
+                            pass
+
                     self.telegram.send_cycle_summary(
                         results=cycle_results,
                         daily_pnl=self.daily_pnl,
                         open_positions=len(self.executor.open_positions),
                         trade_count=self.trade_count,
+                        regime=regime_str,
                     )
 
                 # Check open positions for ALL symbols
@@ -601,11 +632,19 @@ class TradingBot:
                     self.telegram.send(msg)
                     self.log.info(f"[{symbol}] Position closed: {updated}")
 
-                    # Remove position from executor so it doesn't accumulate forever (P1-6)
-                    try:
-                        self.executor.open_positions.remove(pos)
-                    except (ValueError, AttributeError):
-                        self.log.warning(f"[{symbol}] Position already removed from list")
+                    # Actually close position on exchange in live mode
+                    if self.mode == "live":
+                        close_result = self.executor.close_position(
+                            symbol, reason=updated.get('reason', 'SL/TP')
+                        )
+                        if not close_result.get('success'):
+                            self.log.error(f"[{symbol}] Failed to close position on exchange: {close_result.get('error')}")
+                    else:
+                        # Paper mode: just remove from list
+                        try:
+                            self.executor._open_positions.remove(pos)
+                        except (ValueError, AttributeError):
+                            self.log.warning(f"[{symbol}] Position already removed from list")
 
         # Daily summary
         open_count = len(self.executor.open_positions)

@@ -677,7 +677,13 @@ class SentimentAnalyzer:
         """
         sentiment = self.analyze(symbol)
         self._last_score = sentiment.score
-        self._last_label = sentiment.label or "Neutral"
+        # Derive label from score (SentimentResult has no label field)
+        if sentiment.score > 0.3:
+            self._last_label = "Positive"
+        elif sentiment.score < -0.3:
+            self._last_label = "Negative"
+        else:
+            self._last_label = "Neutral"
 
         if sentiment.error:
             # Can't confirm — reduce confidence but don't block completely
@@ -700,20 +706,25 @@ class SentimentAnalyzer:
                     f"News bullish ({sent_score:+.2f}, c:{sent_conf:.2f}) ✓",
                 )
             elif sent_score > 0.0:
-                # Mildly positive — weak confirmation, reduce confidence
+                # Mildly positive — weak confirmation
+                return (
+                    "BUY",
+                    raw_confidence * 0.85,
+                    f"News weakly bullish ({sent_score:+.2f})",
+                )
+            elif sent_score > -0.3:
+                # Mildly negative — slight reduce but don't block
                 return (
                     "BUY",
                     raw_confidence * 0.7,
-                    f"News weakly bullish ({sent_score:+.2f}), "
-                    f"reduced confidence",
+                    f"News mildly negative ({sent_score:+.2f}), reduced confidence",
                 )
             else:
-                # Neutral or negative — BLOCK
+                # Strongly negative — BLOCK
                 return (
                     "HOLD",
                     0.0,
-                    f"News bearish/neutral ({sent_score:+.2f}), "
-                    f"blocking BUY ✗",
+                    f"News strongly negative ({sent_score:+.2f}), blocking BUY ✗",
                 )
 
         elif raw_signal == "SELL":

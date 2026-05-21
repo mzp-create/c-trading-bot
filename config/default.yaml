@@ -29,7 +29,7 @@ exchange:
   api_secret: "${BITFINEX_API_SECRET}"  # Set via env var
 
 strategies:
-  enabled: ["trend_following", "scalping", "grid"]
+  enabled: ["trend_following", "grid"]
   trend_following:
     enabled: true
     weight: 0.4
@@ -40,7 +40,7 @@ strategies:
     rsi_overbought: 70
     rsi_oversold: 30
   scalping:
-    enabled: true
+    enabled: false
     weight: 0.35
     timeframe: "5m"
     macd_fast: 12

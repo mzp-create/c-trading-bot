@@ -11,7 +11,12 @@ import pandas as pd
 import logging
 import time
 import random
+import requests
+import hmac
+import hashlib
+import json
 from typing import Optional, Dict, List, Any, Tuple
+from pathlib import Path
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -40,6 +45,11 @@ class BitfinexClient:
         self.mode = mode
         self.exchange_config = config.get("exchange", {})
         self.trading_config = config.get("trading", {})
+
+        # Non-local vars & caches
+        self._v2_nonce_counter = 0
+        self._cached_balance: dict = {}
+        self._cached_balance_ts: float = 0.0
 
         self._log = logging.getLogger(f"{__name__}.BitfinexClient")
         self._log.info(
@@ -268,6 +278,65 @@ class BitfinexClient:
             self._log.error("fetch_orderbook(%s) failed: %s", symbol, exc)
             return {"bids": [], "asks": [], "symbol": symbol}
 
+    def _v2_post(self, path: str, body: dict) -> list:
+        """Make a signed POST to Bitfinex v2 REST API with guaranteed increasing nonce.
+
+        Nonces are persisted to a flock-protected file so they survive restarts
+        and work across concurrent processes. The initial seed is a large value
+        ending in 6 zeros — Bitfinex rejects nonces that don't end in zeros.
+        """
+        # ── atomic nonce generation via file lock ──────────────────────────
+        nonce_path = str(
+            Path(self.config.get("data", {}).get("ohlcv_dir", "data/ohlcv")).parent / ".bfx_nonce"
+        )
+        Path(nonce_path).parent.mkdir(parents=True, exist_ok=True)
+        import os as _os, fcntl as _fcntl
+    
+        fd = _os.open(nonce_path, _os.O_RDWR | _os.O_CREAT, 0o600)
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX)
+            raw = _os.read(fd, 64).decode().strip()
+            last = int(raw) if raw else 999_999_960_000_000_000_000
+    
+            candidate = int(time.time() * 1_000_000)
+            if candidate <= last:
+                candidate = last + 1_000_000  # keep trailing zeros
+    
+            # Round to nearest 1_000_000 — Bitfinex only accepts nonces ending in zeros
+            candidate = ((candidate + 999_999) // 1_000_000) * 1_000_000
+    
+            _os.lseek(fd, 0, _os.SEEK_SET)
+            _os.ftruncate(fd, 0)
+            _os.write(fd, str(candidate).encode())
+            _os.fsync(fd)
+            nonce = str(candidate)
+        finally:
+            _fcntl.flock(fd, _fcntl.LOCK_UN)
+            _os.close(fd)
+        payload_str = json.dumps(body)
+        sig_payload = f"/api{path}{nonce}{payload_str}"
+        signature = hmac.new(
+            self.exchange_config.get("api_secret", "").encode(),
+            sig_payload.encode(),
+            hashlib.sha384
+        ).hexdigest()
+        headers = {
+            "bfx-nonce": nonce,
+            "bfx-apikey": self.exchange_config.get("api_key", ""),
+            "bfx-signature": signature,
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(
+            f"https://api.bitfinex.com{path}",
+            headers=headers,
+            data=payload_str,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            self._log.error("_v2_post %s failed: HTTP %d nonce=%s resp=%s", path, resp.status_code, nonce, resp.text[:200])
+        resp.raise_for_status()
+        return resp.json()
+
     def create_order(self, symbol: str, type: str, side: str,
                      amount: float, price: Optional[float] = None) -> dict:
         """Place a limit or market order.
@@ -279,10 +348,39 @@ class BitfinexClient:
 
         self._rate_limit_wait()
         try:
-            order = self._exchange.create_order(symbol, type, side, amount, price)
-            self._log.info("Order created: %s %s %.6f @ %s", side, symbol, amount, price or "market")
-            return order
-        except ccxt.BaseError as exc:
+            default_type = self.exchange_config.get("default_type", "spot")
+            
+            if default_type == "margin":
+                body = {
+                    "type": "MARKET" if type == "market" else "LIMIT",
+                    "symbol": symbol,
+                    "amount": str(amount) if side == "buy" else f"-{amount}",
+                    "price": str(price) if type == "limit" else "1",
+                    "flags": 65536,  # Margin trading flag (0x10000)
+                }
+                raw = self._v2_post("/v2/auth/w/order/submit", body)
+                
+                # Bitfinex v2 response: [order_id, "on-req", null, null, [[order_data]], ...]
+                if isinstance(raw, list) and len(raw) > 4 and isinstance(raw[4], list) and len(raw[4]) > 0:
+                    od = raw[4][0]
+                    if isinstance(od, dict):
+                        self._log.info(f"Margin order created: id={od.get('id')} amount={od.get('amount')}")
+                        return {
+                            "id": od.get("id", str(int(time.time()))),
+                            "price": float(od.get("price", price or 0)),
+                            "filled": abs(float(od.get("amount", amount))),
+                            "status": od.get("status", "ACTIVE"),
+                            "amount": abs(float(od.get("amount", amount))),
+                            "fee": {},
+                        }
+                
+                self._log.error(f"Margin order unexpected response: {raw}")
+                return {"success": False, "error": f"Unexpected response: {raw}"}
+            else:
+                order = self._exchange.create_order(symbol, type, side, amount, price, {})
+                self._log.info("Order created: %s %s %.6f @ %s", side, symbol, amount, price or "market")
+                return order
+        except (ccxt.BaseError, requests.RequestException, Exception) as exc:
             self._log.error("create_order failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
@@ -309,49 +407,35 @@ class BitfinexClient:
         """Return balance dict with free / used / total per currency.
 
         In paper mode returns the virtual balance.
+        Uses Bitfinex v2 REST API wallet list for accurate margin balances.
         On margin, Bitfinex uses 'UST' instead of 'USDT' — we alias it.
-        Also checks raw API 'info' for currencies ccxt doesn't parse.
         """
         if self.mode == "paper":
             bal = self._paper_balance.copy()
             return bal
 
+        # Cache balance for 10s — prevents hammering on Telegram command bursts
+        import time as _time
+        if _time.time() - self._cached_balance_ts < 10.0 and self._cached_balance:
+            return self._cached_balance
+
         self._rate_limit_wait()
         try:
-            bal = self._exchange.fetch_balance()
-        except ccxt.BaseError as exc:
+            raw = self._v2_post("/v2/auth/r/wallets", {})
+            bal = {"free": {}, "used": {}, "total": {}}
+            if isinstance(raw, list):
+                for w in raw:
+                    if isinstance(w, list) and len(w) >= 5:
+                        currency = str(w[1])
+                        total_val = float(w[2])
+                        avail_val = float(w[4])
+                        if total_val > 0:
+                            bal["total"][currency] = bal["total"].get(currency, 0) + total_val
+                            bal["free"][currency] = bal["free"].get(currency, 0) + avail_val
+                            bal["used"][currency] = bal["used"].get(currency, 0) + (total_val - avail_val)
+        except Exception as exc:
             self._log.error("fetch_balance failed: %s", exc)
             return {}
-
-        # Ensure total/free/used dicts exist
-        if "total" not in bal:
-            bal["total"] = {}
-        if "free" not in bal:
-            bal["free"] = {}
-        if "used" not in bal:
-            bal["used"] = {}
-
-        # Check raw info for wallets ccxt missed (e.g. margin UST on Bitfinex)
-        info = bal.get("info", [])
-        if isinstance(info, list):
-            for wallet in info:
-                if isinstance(wallet, list) and len(wallet) >= 5:
-                    wtype = wallet[0]
-                    currency = str(wallet[1])
-                    total_str = wallet[2]
-                    available_str = wallet[4]
-                    try:
-                        total_val = float(total_str)
-                        avail_val = float(available_str)
-                        if total_val > 0:
-                            if currency not in bal["total"]:
-                                bal["total"][currency] = total_val
-                            if currency not in bal["free"]:
-                                bal["free"][currency] = avail_val
-                            if currency not in bal["used"]:
-                                bal["used"][currency] = total_val - avail_val
-                    except (ValueError, TypeError):
-                        pass
 
         # Alias UST -> USDT so the bot works with BTC/USDT
         if "UST" in bal.get("total", {}) and "USDT" not in bal.get("total", {}):
@@ -360,8 +444,11 @@ class BitfinexClient:
             ust_used = bal["used"].get("UST", 0)
             bal["total"]["USDT"] = ust_total
             bal["free"]["USDT"] = ust_free
-            bal["used"]["USDT"] = ust_used
+            bal['used']['USDT'] = ust_used
 
+        # Update cache
+        self._cached_balance = bal
+        self._cached_balance_ts = _time.time()
         return bal
 
     def fetch_open_orders(self, symbol: Optional[str] = None) -> list:
@@ -381,22 +468,39 @@ class BitfinexClient:
             return []
 
     def fetch_position(self, symbol: str) -> dict:
-        """Return position info for a symbol (margin)."""
+        """Return position info for a symbol (margin) using Bitfinex v2 REST API."""
+        if self.mode == "paper":
+            return self._paper_positions.get(symbol, {
+                "symbol": symbol,
+                "contracts": 0.0,
+                "entryPrice": 0.0,
+                "unrealizedPnl": 0.0,
+            })
+        
         self._rate_limit_wait()
         try:
-            positions = self._exchange.fetch_positions([symbol])
-            if positions:
-                return positions[0]
-        except ccxt.BaseError as exc:
+            raw = self._v2_post("/v2/auth/r/positions", {})
+            if isinstance(raw, list):
+                for pos in raw:
+                    if isinstance(pos, list) and len(pos) >= 10 and pos[0] == symbol:
+                        contracts = abs(float(pos[2]))
+                        entry = float(pos[3])
+                        pnl = float(pos[6]) if len(pos) > 6 else 0.0
+                        side = "long" if float(pos[2]) > 0 else "short"
+                        return {
+                            "symbol": symbol,
+                            "contracts": contracts,
+                            "entryPrice": entry,
+                            "unrealizedPnl": pnl,
+                            "side": side,
+                            "amount": contracts,
+                        }
+                # No position found — return empty
+                return {"symbol": symbol, "contracts": 0.0, "entryPrice": 0.0, "unrealizedPnl": 0.0}
+        except Exception as exc:
             self._log.error("fetch_position(%s) failed: %s", symbol, exc)
-
-        # Fallback for paper
-        return self._paper_positions.get(symbol, {
-            "symbol": symbol,
-            "contracts": 0.0,
-            "entryPrice": 0.0,
-            "unrealizedPnl": 0.0,
-        })
+        
+        return {"symbol": symbol, "contracts": 0.0, "entryPrice": 0.0, "unrealizedPnl": 0.0}
 
     def get_ws_url(self) -> str:
         """Return the Bitfinex WebSocket URL."""

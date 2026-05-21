@@ -75,6 +75,8 @@ class ExecutionEngine:
 
         # --- Internal state ---
         self._open_positions: List[Dict[str, Any]] = []
+        self._cached_live_positions: List[Dict[str, Any]] = []  # refreshed once per cycle
+        self._live_position_meta: Dict[str, Dict[str, Any]] = {}  # SL/TP tracking for live positions
         self._order_history: deque = deque(maxlen=1000)  # bounded to prevent memory leak (P2-16)
         self._trade_history: deque = deque(maxlen=1000)  # bounded to prevent memory leak (P2-16)
         self._next_order_id: int = 1
@@ -107,17 +109,41 @@ class ExecutionEngine:
 
     @property
     def open_positions(self) -> List[Dict[str, Any]]:
-        """List of currently open positions."""
+        """List of currently open positions.
+
+        Uses a cached result updated once per bot cycle to avoid hammering
+        the exchange API on every property access (Telegram commands, cycle
+        summaries, position checks all read this).
+        """
         if self.mode == "paper":
             return self._open_positions
-        # Live: fetch from exchange
-        if self._client:
-            try:
-                positions = self._get_live_positions()
-                return positions
-            except Exception as exc:
-                self._log.error("Failed to fetch live positions: %s", exc)
-        return []
+        # Live: return cached positions merged with local SL/TP metadata
+        return self._merge_live_positions_with_meta()
+
+    def _merge_live_positions_with_meta(self) -> List[Dict[str, Any]]:
+        """Merge exchange-fetched positions with local SL/TP tracking data."""
+        merged = []
+        for pos in self._cached_live_positions:
+            symbol = pos.get("symbol", "")
+            # Merge with local metadata (SL/TP set at entry)
+            meta = self._live_position_meta.get(symbol, {})
+            merged_pos = {**pos, **meta}
+            merged.append(merged_pos)
+        return merged
+
+    def _update_position_cache(self):
+        """Force-refresh the cached live positions from the exchange.
+
+        Called once per bot cycle (inside execute_trade_cycle) so every
+        consumer of open_positions reads fresh-but-not-excessive data.
+        """
+        if not self._client or self.mode == "paper":
+            return
+        try:
+            positions = self._get_live_positions()
+            self._cached_live_positions = positions
+        except Exception as exc:
+            self._log.error("Failed to update position cache: %s", exc)
 
     # ── order execution ───────────────────────────────────────────────────
 
@@ -722,6 +748,17 @@ class ExecutionEngine:
         pos["highest_price"] = fill_price if side == "buy" else 0.0
         pos["lowest_price"] = fill_price if side == "sell" else float("inf")
 
+        # Store SL/TP metadata for live position tracking
+        if self.mode == "live":
+            self._live_position_meta[symbol] = {
+                "stop_loss": pos.get("stop_loss", 0.0),
+                "take_profit": pos.get("take_profit", 0.0),
+                "trailing_stop": pos.get("trailing_stop", False),
+                "highest_price": pos.get("highest_price", 0.0),
+                "lowest_price": pos.get("lowest_price", float("inf")),
+                "order_id": order_id,
+            }
+
         self._open_positions.append(pos)
         self._order_history.append(pos)
 
@@ -808,6 +845,99 @@ class ExecutionEngine:
                 writer.writerow(record)
         except Exception as exc:
             self._log.error("Failed to write trade to CSV: %s", exc)
+
+    def close_position(self, symbol: str, reason: str = "manual") -> Dict[str, Any]:
+        """Close an open position for a symbol.
+
+        Parameters
+        ----------
+        symbol : str
+            Trading pair, e.g. "BTC/USDT".
+        reason : str
+            Reason for closing (for logging).
+
+        Returns
+        -------
+        dict
+            Close result with keys 'success', 'pnl', 'order_id', 'error'.
+        """
+        self._log.info(f"Closing position for {symbol} (reason: {reason})")
+
+        # Find position in our tracking
+        position = None
+        for pos in self.open_positions:
+            if pos.get("symbol") == symbol:
+                position = pos
+                break
+
+        if not position:
+            return {"success": False, "error": f"No open position for {symbol}"}
+
+        side = position.get("side", "buy")
+        amount = float(position.get("amount", 0))
+        entry_price = float(position.get("entry_price", 0))
+
+        # Determine close side (opposite of entry)
+        close_side = "sell" if side == "buy" else "buy"
+
+        try:
+            if self.mode == "paper":
+                # Paper mode: simulate closing
+                current_price = self._paper_balance.get(symbol, {}).get("price", entry_price)
+                if close_side == "sell":
+                    pnl = (current_price - entry_price) * amount
+                else:
+                    pnl = (entry_price - current_price) * amount
+
+                # Record trade
+                self._record_trade(position, current_price, pnl, reason)
+
+                # Remove from tracking
+                if position in self._open_positions:
+                    self._open_positions.remove(position)
+
+                self._log.info(f"Paper position closed: {symbol} PnL=${pnl:.2f}")
+                return {"success": True, "pnl": pnl, "price": current_price}
+
+            else:
+                # Live mode: execute close order on exchange
+                self._enforce_rate_limit()
+                result = self._client.create_order(
+                    symbol=symbol.replace("/", ""),
+                    type="market",
+                    side=close_side,
+                    amount=amount,
+                )
+
+                if result.get("success"):
+                    close_price = float(result.get("price", entry_price))
+                    if close_side == "sell":
+                        pnl = (close_price - entry_price) * amount
+                    else:
+                        pnl = (entry_price - close_price) * amount
+
+                    # Record trade
+                    self._record_trade(position, close_price, pnl, reason)
+
+                    # Clean up metadata
+                    if symbol in self._live_position_meta:
+                        del self._live_position_meta[symbol]
+
+                    self._log.info(f"Live position closed: {symbol} PnL=${pnl:.2f}")
+                    return {
+                        "success": True,
+                        "pnl": pnl,
+                        "price": close_price,
+                        "order_id": result.get("order_id"),
+                    }
+                else:
+                    error = result.get("error", "Unknown error")
+                    self._log.error(f"Failed to close position: {error}")
+                    return {"success": False, "error": error}
+
+        except Exception as exc:
+            self._log.error(f"Close position failed: {exc}", exc_info=True)
+            return {"success": False, "error": str(exc)}
 
     # ── rate limiting ────────────────────────────────────────────────────
 

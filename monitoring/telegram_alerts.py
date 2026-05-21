@@ -117,25 +117,158 @@ class TelegramNotifier:
         return self.send(msg)
 
     def send_cycle_summary(self, results: list[dict], daily_pnl: float,
-                           open_positions: int, trade_count: int):
-        """Send a compact cycle summary for all pairs. Only sends if there are open positions or trades today."""
-        # Quiet mode — only alert if something changed
-        if open_positions == 0 and trade_count == 0:
-            return True
-        lines = ["🔄 **Bot Cycle**"]
+                           open_positions: int, trade_count: int,
+                           market_data: dict = None, regime: str = ""):
+        """Send an enhanced cycle summary with market overview and signal details."""
+        lines = ["📊 **Market Overview**"]
+
+        # Market regime indicator
+        regime_emoji = {"TRENDING": "📈", "RANGING": "📊", "VOLATILE": "🌪️"}.get(regime, "⚪")
+        if regime:
+            lines.append(f"{regime_emoji} Regime: *{regime}*")
+            lines.append("")
+
+        # Per-pair detailed signals
         for r in results:
             sym = r.get("symbol_name", r.get("symbol", "?"))
             sig = r.get("signal", "?")
             conf = r.get("confidence", 0)
             price = r.get("current_price", 0)
             reason = r.get("reason", "")
-            emoji = "🟢" if sig == "BUY" else "🔴" if sig == "SELL" else "⚪"
-            lines.append(
-                f"{emoji} {sym}: **{sig}** ({conf:.0%}) @ ${price:.0f}"
-            )
-        lines.append(f"")
-        lines.append(f"💰 Daily PnL: ${daily_pnl:+.2f}")
-        lines.append(f"📊 Positions: {open_positions} | Trades: {trade_count}")
+
+            # Signal emoji and strength bar
+            if sig == "BUY":
+                emoji = "🟢"
+                strength = "▰" * int(conf * 5) + "▱" * (5 - int(conf * 5))
+            elif sig == "SELL":
+                emoji = "🔴"
+                strength = "▰" * int(conf * 5) + "▱" * (5 - int(conf * 5))
+            else:
+                emoji = "⚪"
+                strength = "▱▱▱▱▱"
+
+            # Format price based on value
+            if price > 1000:
+                price_str = f"${price:,.0f}"
+            elif price > 100:
+                price_str = f"${price:.1f}"
+            else:
+                price_str = f"${price:.2f}"
+
+            lines.append(f"{emoji} *{sym}* — {price_str}")
+            lines.append(f"   Signal: `{sig}` {strength} ({conf:.0%})")
+
+            # Add LLM override note if present
+            if "LLM" in reason or "overrode" in reason.lower():
+                lines.append(f"   🧠 LLM filtered")
+
+        lines.append("")
+
+        # Performance summary
+        pnl_emoji = "🟢" if daily_pnl >= 0 else "🔴"
+        target = 100.0
+        progress = min(100, abs(daily_pnl) / target * 100) if target > 0 else 0
+        progress_bar = "█" * int(progress / 10) + "░" * (10 - int(progress / 10))
+
+        lines.append(f"💰 *Performance*")
+        lines.append(f"   Daily PnL: {pnl_emoji} ${daily_pnl:+.2f}")
+        lines.append(f"   Progress:  [{progress_bar}] {progress:.0f}% of $100")
+        lines.append(f"   📊 Positions: {open_positions} | 🔁 Trades: {trade_count}")
+
+        return self.send("\n".join(lines))
+
+    def send_portfolio_summary(self, balance: dict, positions: list,
+                                daily_pnl: float, total_trades: int,
+                                market_prices: dict = None):
+        """Send a comprehensive portfolio summary with allocation breakdown.
+
+        Parameters
+        ----------
+        balance : dict
+            Balance dict with 'free', 'used', 'total' per currency
+        positions : list
+            Open positions with unrealized PnL
+        daily_pnl : float
+            Today's realized PnL
+        total_trades : int
+            Number of trades today
+        market_prices : dict
+            Current market prices for valuation (optional)
+        """
+        lines = ["💼 **Portfolio Summary**"]
+        lines.append("")
+
+        # Wallet breakdown
+        free = balance.get("free", {})
+        used = balance.get("used", {})
+        total = balance.get("total", {})
+
+        usdt_free = float(free.get("USDT", 0))
+        usdt_used = float(used.get("USDT", 0))
+        usdt_total = float(total.get("USDT", 0))
+
+        lines.append("💵 *Margin Wallet*")
+        lines.append(f"   Available: ${usdt_free:,.2f}")
+        lines.append(f"   In Positions: ${usdt_used:,.2f}")
+        lines.append(f"   Total: ${usdt_total:,.2f}")
+        lines.append("")
+
+        # Asset holdings with valuations
+        lines.append("🏦 *Holdings*")
+        assets = ["BTC", "ETH", "SOL"]
+        total_value = usdt_total
+
+        for asset in assets:
+            qty = float(total.get(asset, 0))
+            if qty > 0:
+                price = market_prices.get(f"{asset}/USDT", 0) if market_prices else 0
+                value = qty * price
+                total_value += value
+                if price > 0:
+                    lines.append(f"   {asset}: {qty:.6f} ≈ ${value:,.2f}")
+                else:
+                    lines.append(f"   {asset}: {qty:.6f}")
+
+        lines.append("")
+
+        # Open positions with PnL
+        if positions:
+            lines.append("📈 *Open Positions*")
+            total_unrealized = 0.0
+
+            for pos in positions:
+                sym = pos.get("symbol", "?")
+                side = pos.get("side", "buy").upper()
+                qty = float(pos.get("amount", 0))
+                entry = float(pos.get("entry_price", 0))
+                unrealized = float(pos.get("unrealized_pnl", 0))
+                total_unrealized += unrealized
+
+                emoji = "🟢" if unrealized >= 0 else "🔴"
+                side_emoji = "📗" if side == "BUY" else "📕"
+
+                lines.append(f"   {side_emoji} {sym} {side}")
+                lines.append(f"      Size: {qty:.4f} @ ${entry:,.2f}")
+                lines.append(f"      PnL: {emoji} ${unrealized:+.2f}")
+
+            lines.append("")
+            pnl_emoji = "🟢" if total_unrealized >= 0 else "🔴"
+            lines.append(f"   *Total Unrealized:* {pnl_emoji} ${total_unrealized:+.2f}")
+        else:
+            lines.append("📭 *No Open Positions*")
+
+        lines.append("")
+
+        # Daily performance
+        lines.append("📊 *Today's Performance*")
+        pnl_emoji = "🟢" if daily_pnl >= 0 else "🔴"
+        lines.append(f"   Realized PnL: {pnl_emoji} ${daily_pnl:+.2f}")
+        lines.append(f"   Trades: {total_trades}")
+
+        if daily_pnl != 0 and total_trades > 0:
+            avg_trade = daily_pnl / total_trades
+            lines.append(f"   Avg/Trade: ${avg_trade:+.2f}")
+
         return self.send("\n".join(lines))
 
     # ── Command handling (getUpdates polling) ─────────────────────────────
@@ -228,9 +361,11 @@ class TelegramNotifier:
             "/help":     self._cmd_help,
             "/status":   self._cmd_status,
             "/balance":  self._cmd_balance,
+            "/portfolio": self._cmd_portfolio,
             "/pause":    self._cmd_pause,
             "/resume":   self._cmd_resume,
             "/positions": self._cmd_positions,
+            "/close":    self._cmd_close,
             "/config":   self._cmd_config,
             "/sentiment": self._cmd_sentiment,
             "/retrain":  self._cmd_retrain,
@@ -287,7 +422,9 @@ class TelegramNotifier:
             "🤖 **Crypto Trader Commands**\n\n"
             "/status — Bot status, PnL, positions\n"
             "/balance — Wallet balance per pair\n"
+            "/portfolio — Full portfolio summary\n"
             "/positions — Open position details\n"
+            "/close <symbol> — Close a position (e.g. /close BTC/USDT)\n"
             "/pause — Pause trading\n"
             "/resume — Resume trading\n"
             "/config — Current configuration\n"
@@ -353,6 +490,109 @@ class TelegramNotifier:
             return f"⚠️ Balance fetch failed: {e}"
 
     @staticmethod
+    def _cmd_portfolio(_args: str, bot: "TradingBot") -> str:  # noqa: F821
+        """Show comprehensive portfolio summary."""
+        try:
+            # Fetch balance
+            balance = bot.collector.client.fetch_balance()
+            free = balance.get("free", {})
+            used = balance.get("used", {})
+            total = balance.get("total", {})
+
+            # Get current market prices for valuation
+            prices = {}
+            for s in bot.symbols:
+                try:
+                    sym = s["name"]
+                    price = bot.collector.get_current_price(sym)
+                    if price:
+                        prices[sym] = price
+                except Exception:
+                    pass
+
+            # Build portfolio lines
+            lines = ["💼 **Portfolio Summary**"]
+            lines.append("")
+
+            # USDT Margin breakdown
+            usdt_free = float(free.get("USDT", 0))
+            usdt_used = float(used.get("USDT", 0))
+            usdt_total = float(total.get("USDT", 0))
+
+            lines.append("💵 *Margin Wallet*")
+            lines.append(f"   Available: ${usdt_free:,.2f}")
+            lines.append(f"   In Positions: ${usdt_used:,.2f}")
+            lines.append(f"   Total: ${usdt_total:,.2f}")
+            lines.append("")
+
+            # Crypto holdings with valuations
+            lines.append("🏦 *Asset Holdings*")
+            crypto_value = 0.0
+            for asset in ["BTC", "ETH", "SOL"]:
+                qty = float(total.get(asset, 0))
+                if qty > 0:
+                    price = prices.get(f"{asset}/USDT", 0)
+                    value = qty * price
+                    crypto_value += value
+                    # Asset emojis
+                    if asset == "BTC":
+                        emoji = "₿"
+                    elif asset == "ETH":
+                        emoji = "Ξ"
+                    else:
+                        emoji = "◎"
+                    lines.append(f"   {emoji} {asset}: {qty:.6f} ≈ ${value:,.2f}")
+
+            total_portfolio = usdt_total + crypto_value
+            lines.append(f"   ")
+            lines.append(f"   *Total Portfolio:* ${total_portfolio:,.2f}")
+            lines.append("")
+
+            # Open positions with PnL
+            positions = bot.executor.open_positions
+            if positions:
+                lines.append("📈 *Open Positions*")
+                total_unrealized = 0.0
+
+                for pos in positions:
+                    sym = pos.get("symbol", "?")
+                    side = pos.get("side", "buy").upper()
+                    qty = float(pos.get("amount", 0))
+                    entry = float(pos.get("entry_price", 0))
+                    unrealized = float(pos.get("unrealized_pnl", 0) or 0)
+                    total_unrealized += unrealized
+
+                    emoji = "🟢" if unrealized >= 0 else "🔴"
+                    side_emoji = "📗" if side == "BUY" else "📕"
+
+                    lines.append(f"   {side_emoji} {sym} {side}")
+                    lines.append(f"      Size: {qty:.4f} @ ${entry:,.2f}")
+                    lines.append(f"      PnL: {emoji} ${unrealized:+.2f}")
+
+                lines.append("")
+                pnl_emoji = "🟢" if total_unrealized >= 0 else "🔴"
+                lines.append(f"   *Total Unrealized:* {pnl_emoji} ${total_unrealized:+.2f}")
+            else:
+                lines.append("📭 *No Open Positions*")
+
+            lines.append("")
+
+            # Today's performance
+            lines.append("📊 *Today's Performance*")
+            pnl_emoji = "🟢" if bot.daily_pnl >= 0 else "🔴"
+            lines.append(f"   Realized PnL: {pnl_emoji} ${bot.daily_pnl:+.2f}")
+            lines.append(f"   Trades: {bot.trade_count}")
+
+            if bot.trade_count > 0:
+                avg = bot.daily_pnl / bot.trade_count
+                lines.append(f"   Avg per Trade: ${avg:+.2f}")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"⚠️ Portfolio fetch failed: {e}"
+
+    @staticmethod
     def _cmd_pause(_args: str, bot: "TradingBot") -> str:  # noqa: F821
         bot.paused = True
         bot.log.info("Trading paused via Telegram command")
@@ -373,22 +613,77 @@ class TelegramNotifier:
         lines = ["📊 **Open Positions**"]
         for p in positions:
             sym = p.get("symbol", "?")
-            qty = p.get("quantity", 0)
+            qty = p.get("amount", p.get("quantity", 0))
             entry = p.get("entry_price", 0)
-            sl = p.get("stop_loss", "N/A")
-            tp = p.get("take_profit", "N/A")
-            pnl = p.get("unrealized_pnl", 0)
-            side = p.get("side", "LONG")
-            direction = "🟢" if side.upper() == "BUY" else "🔴"
+            side_raw = p.get("side", "long")
+            direction = "🟢" if side_raw.lower() in ("buy", "long") else "🔴"
+            pnl = p.get("unrealized_pnl", p.get("unrealizedPnl", 0))
+            # SL/TP may not be in live position data from exchange
+            sl = p.get("stop_loss")
+            tp = p.get("take_profit")
+            current_price = 0
+            try:
+                current_price = bot.collector.get_current_price(sym)
+            except Exception:
+                pass
 
             lines.append(
                 f"\n{direction} **{sym}**\n"
-                f"  Side: {side}\n"
+                f"  Side: {side_raw.upper()}\n"
                 f"  Qty: {qty:.4f} @ ${entry:.2f}\n"
-                f"  SL: ${sl:.2f} | TP: ${tp:.2f}\n"
-                f"  PnL: ${pnl:+.2f}"
             )
+            if sl:
+                lines.append(f"  SL: ${float(sl):.2f}")
+            if tp:
+                lines.append(f"  TP: ${float(tp):.2f}")
+            if current_price and entry > 0:
+                if side_raw.lower() in ("buy", "long"):
+                    pnl_val = (current_price - entry) * qty
+                else:
+                    pnl_val = (entry - current_price) * qty
+                lines[-1] += f" | Current: ${current_price:.2f}"
+                lines.append(f"  PnL: ${pnl_val:+.2f}")
+            elif pnl != 0:
+                lines.append(f"  PnL: ${float(pnl):+.2f}")
+
         return "\n".join(lines)
+
+    @staticmethod
+    def _cmd_close(args: str, bot: "TradingBot") -> str:  # noqa: F821
+        """Close a specific position."""
+        if not args:
+            return "⚠️ Usage: `/close <symbol>` (e.g. `/close BTC/USDT`)"
+
+        symbol = args.strip()
+        # Normalize symbol format
+        if "/" not in symbol:
+            # Try to add /USDT if missing
+            symbol = f"{symbol}/USDT"
+
+        # Check if position exists
+        positions = bot.executor.open_positions
+        target = None
+        for p in positions:
+            if p.get("symbol") == symbol:
+                target = p
+                break
+
+        if not target:
+            return f"📭 No open position for `{symbol}`"
+
+        # Execute close
+        result = bot.executor.close_position(symbol, reason="manual")
+        if result.get('success'):
+            pnl = result.get('pnl', 0)
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            return (
+                f"{emoji} **Position Closed**\n"
+                f"Symbol: `{symbol}`\n"
+                f"PnL: ${pnl:+.2f}\n"
+                f"Price: ${result.get('price', 0):.2f}"
+            )
+        else:
+            return f"⚠️ Failed to close `{symbol}`: {result.get('error', 'Unknown error')}"
 
     @staticmethod
     def _cmd_config(_args: str, bot: "TradingBot") -> str:  # noqa: F821
