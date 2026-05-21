@@ -573,12 +573,16 @@ class TradingBot:
                         except Exception:
                             pass
 
+                    # Get daily target from config
+                    daily_target = self.config.get('trading', {}).get('daily_target', 10.0)
+
                     self.telegram.send_cycle_summary(
                         results=cycle_results,
                         daily_pnl=self.daily_pnl,
                         open_positions=len(self.executor.open_positions),
                         trade_count=self.trade_count,
                         regime=regime_str,
+                        daily_target=daily_target,
                     )
 
                 # Check open positions for ALL symbols

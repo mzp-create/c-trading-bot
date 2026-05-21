@@ -118,7 +118,8 @@ class TelegramNotifier:
 
     def send_cycle_summary(self, results: list[dict], daily_pnl: float,
                            open_positions: int, trade_count: int,
-                           market_data: dict = None, regime: str = ""):
+                           market_data: dict = None, regime: str = "",
+                           daily_target: float = 10.0):
         """Send an enhanced cycle summary with market overview and signal details."""
         lines = ["📊 **Market Overview**"]
 
@@ -166,13 +167,13 @@ class TelegramNotifier:
 
         # Performance summary
         pnl_emoji = "🟢" if daily_pnl >= 0 else "🔴"
-        target = 100.0
+        target = daily_target
         progress = min(100, abs(daily_pnl) / target * 100) if target > 0 else 0
         progress_bar = "█" * int(progress / 10) + "░" * (10 - int(progress / 10))
 
         lines.append(f"💰 *Performance*")
         lines.append(f"   Daily PnL: {pnl_emoji} ${daily_pnl:+.2f}")
-        lines.append(f"   Progress:  [{progress_bar}] {progress:.0f}% of $100")
+        lines.append(f"   Progress:  [{progress_bar}] {progress:.0f}% of ${target:.0f}")
         lines.append(f"   📊 Positions: {open_positions} | 🔁 Trades: {trade_count}")
 
         return self.send("\n".join(lines))

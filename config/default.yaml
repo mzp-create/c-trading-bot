@@ -14,7 +14,7 @@ trading:
       allocation_pct: 20.0  # 20% of capital
       enabled: true
   initial_capital: 526.8  # USDT total across all pairs
-  daily_target: 100.0     # $100/day profit target
+  daily_target: 10.0     # $10/day profit target (realistic with $526 capital)
   max_risk_per_trade: 0.02  # 2% max risk per trade
   max_open_positions: 6  # 2 per pair max
   position_size_mode: "dynamic"  # fixed, dynamic, kelly
