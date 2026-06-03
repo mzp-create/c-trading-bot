@@ -7,7 +7,6 @@ configuration, and summary statistics. Serves a single-page HTML dashboard.
 
 import os
 import time
-import csv
 import logging
 import hashlib
 import hmac
@@ -32,7 +31,12 @@ import urllib.request
 HERE = Path(__file__).resolve().parent
 BOT_DIR = HERE.parent  # trading-bot/
 CONFIG_PATH = BOT_DIR / "config" / "default.yaml"
-TRADES_PATH = BOT_DIR / "data" / "trades.csv"
+# Trade history now lives in SQLite (one DB per instance). Union all that exist.
+DB_PATHS = [
+    BOT_DIR / "data" / "trading.db",
+    BOT_DIR / "instances" / "long" / "data" / "trading.db",
+    BOT_DIR / "instances" / "short" / "data" / "trading.db",
+]
 LOG_PATH = BOT_DIR / "logs" / "bot.log"
 ENV_PATH = BOT_DIR / ".env"
 STATIC_DIR = HERE / "static"
@@ -169,18 +173,36 @@ def read_config() -> dict:
         return {}
 
 
+def _db_paths():
+    """Existing per-instance DB files to read (overridable in tests)."""
+    return [p for p in DB_PATHS if Path(p).exists()]
+
+
 def read_trades() -> list[dict]:
-    """Read trades.csv and return a list of trade dicts."""
-    if not TRADES_PATH.exists():
-        return []
-    rows = []
-    try:
-        with open(TRADES_PATH, newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                rows.append(row)
-    except Exception as exc:
-        logger.error("Error reading trades: %s", exc)
+    """Trade history from the SQLite DB(s), newest-first sort done by callers.
+
+    Returns dicts using the same field names the frontend already consumes
+    (`timestamp`, `symbol`, `side`, `entry_price`, `close_price`, `amount`,
+    `pnl`, `reason`, `mode`), plus `instance`. Read-only WAL connections so a
+    running bot is never blocked.
+    """
+    import sqlite3
+    rows: list[dict] = []
+    for db in _db_paths():
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                "SELECT ts, instance, symbol, side, entry_price, close_price, "
+                "amount, pnl, fee, reason, mode FROM trades ORDER BY ts")
+            for r in cur.fetchall():
+                d = dict(r)
+                d["timestamp"] = d.pop("ts")   # frontend expects 'timestamp'
+                rows.append(d)
+            conn.close()
+        except sqlite3.Error as exc:
+            logger.error("Error reading trades DB %s: %s", db, exc)
+    rows.sort(key=lambda x: x.get("timestamp", ""))
     return rows
 
 
@@ -391,7 +413,7 @@ def api_balance(auth: bool = Depends(verify_password)):
 
 @app.get("/api/trades")
 def api_trades(auth: bool = Depends(verify_password)):
-    """Trade history from trades.csv."""
+    """Trade history from SQLite DB(s)."""
     trades = read_trades()
     # Return most recent first
     trades.reverse()
