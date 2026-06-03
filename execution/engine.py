@@ -958,6 +958,35 @@ class ExecutionEngine:
 
     # ── trade history ────────────────────────────────────────────────────
 
+    def _persist_close(self, *, symbol, side, close_side, amount, entry_price,
+                       close_price, pnl, reason, opened_at,
+                       exchange_order_id=None):
+        """Persist a position close: a synthetic open+close position row, a
+        reduce-only close order, and its fill. All calls go through the
+        repository's _safe guard, so this never raises into the trading path.
+
+        Phase-1 note: the engine does not yet carry a persistent position id
+        from entry time, so we record the position as opened-then-closed in one
+        shot here. Real entry-to-exit position tracking lands in a later phase.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        pos_id = self._repo.open_position(PositionRecord(
+            symbol=symbol, side=side, amount=abs(amount),
+            entry_price=entry_price, opened_at=opened_at or now))
+        # NOTE: pos_id is -1 if open_position failed (logged at ERROR by the
+        # repo); close_position then no-ops on WHERE id=-1. Trading is unaffected.
+        self._repo.close_position(pos_id, closed_at=now,
+                                  close_price=close_price,
+                                  realized_pnl=round(pnl, 2))
+        close_oid = self._repo.record_order(OrderRecord(
+            ts=now, symbol=symbol, side=close_side, order_type="market",
+            amount=abs(amount), price=close_price, reduce_only=True,
+            reason=reason, status="filled", filled=abs(amount),
+            avg_price=close_price, exchange_order_id=exchange_order_id))
+        self._repo.record_fill(FillRecord(
+            ts=now, symbol=symbol, side=close_side, amount=abs(amount),
+            price=close_price, order_id=close_oid))
+
     def _record_trade(
         self,
         position: dict,
@@ -1050,25 +1079,13 @@ class ExecutionEngine:
                 else:
                     pnl = (entry_price - current_price) * amount
 
-                # Persist the position lifecycle, a reduce-only close order,
-                # and the resulting fill (all additive; never raise).
-                # OrderRecord/FillRecord/PositionRecord imported at module level.
-                now = datetime.now(timezone.utc).isoformat()
-                pos_id = self._repo.open_position(PositionRecord(
-                    symbol=symbol, side=side, amount=abs(amount),
-                    entry_price=entry_price,
-                    opened_at=position.get("timestamp", now)))
-                self._repo.close_position(pos_id, closed_at=now,
-                                          close_price=current_price,
-                                          realized_pnl=round(pnl, 2))
-                close_oid = self._repo.record_order(OrderRecord(
-                    ts=now, symbol=symbol, side=close_side, order_type="market",
-                    amount=abs(amount), price=current_price, reduce_only=True,
-                    reason=reason, status="filled", filled=abs(amount),
-                    avg_price=current_price))
-                self._repo.record_fill(FillRecord(
-                    ts=now, symbol=symbol, side=close_side, amount=abs(amount),
-                    price=current_price, order_id=close_oid))
+                # Persist the close (position lifecycle + reduce-only order +
+                # fill); additive and never raises. See _persist_close.
+                self._persist_close(
+                    symbol=symbol, side=side, close_side=close_side,
+                    amount=amount, entry_price=entry_price,
+                    close_price=current_price, pnl=pnl, reason=reason,
+                    opened_at=position.get("timestamp"))
 
                 # Record trade
                 self._record_trade(position, current_price, pnl, reason)
@@ -1110,27 +1127,14 @@ class ExecutionEngine:
                     else:
                         pnl = (entry_price - close_price) * amount
 
-                    # Persist position lifecycle, reduce-only close order, fill.
-                    now = datetime.now(timezone.utc).isoformat()
-                    pos_id = self._repo.open_position(PositionRecord(
-                        symbol=symbol, side=side, amount=abs(amount),
-                        entry_price=entry_price,
-                        opened_at=position.get("timestamp", now)))
-                    self._repo.close_position(pos_id, closed_at=now,
-                                              close_price=close_price,
-                                              realized_pnl=round(pnl, 2))
-                    close_oid = self._repo.record_order(OrderRecord(
-                        ts=now, symbol=symbol, side=close_side,
-                        order_type="market", amount=abs(amount),
-                        price=close_price, reduce_only=True, reason=reason,
-                        status="filled", filled=abs(amount),
-                        avg_price=close_price,
+                    # Persist the close; additive and never raises.
+                    self._persist_close(
+                        symbol=symbol, side=side, close_side=close_side,
+                        amount=amount, entry_price=entry_price,
+                        close_price=close_price, pnl=pnl, reason=reason,
+                        opened_at=position.get("timestamp"),
                         exchange_order_id=str(result.get("order_id") or "")
-                        or None))
-                    self._repo.record_fill(FillRecord(
-                        ts=now, symbol=symbol, side=close_side,
-                        amount=abs(amount), price=close_price,
-                        order_id=close_oid))
+                        or None)
 
                     # Journal the trade and clear local SL/TP metadata so the
                     # closed position is no longer tracked.
