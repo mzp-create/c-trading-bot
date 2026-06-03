@@ -317,20 +317,43 @@ class ExecutionEngine:
             side.upper(), symbol, amount, price, order_type,
         )
 
+        # Persist the entry order (additive; never blocks trading).
+        db_order_id = self._repo.record_order(OrderRecord(
+            ts=datetime.now(timezone.utc).isoformat(),
+            symbol=symbol, side=side, order_type=order_type,
+            amount=abs(amount), price=price, reduce_only=False,
+            reason="entry"))
+
         try:
             if self.mode == "paper":
-                return self._paper_execute_order(
+                result = self._paper_execute_order(
                     symbol, side, amount, price, order_type,
                     stop_loss_pct, take_profit_pct,
                 )
             else:
-                return self._live_execute_order(
+                result = self._live_execute_order(
                     symbol, side, amount, price, order_type,
                     stop_loss_pct, take_profit_pct,
                 )
         except Exception as exc:
             self._log.error("Order execution failed: %s", exc, exc_info=True)
-            return {"success": False, "error": str(exc)}
+            self._repo.update_order(db_order_id, status="rejected", filled=0.0,
+                                    avg_price=None, error=str(exc))
+            return {"success": False, "error": str(exc),
+                    "db_order_id": db_order_id}
+
+        # Reflect the outcome on the order row and surface the id to callers.
+        if result.get("success"):
+            self._repo.update_order(
+                db_order_id, status="filled", filled=abs(amount),
+                avg_price=result.get("filled_price") or result.get("average")
+                or price)
+        else:
+            self._repo.update_order(
+                db_order_id, status="rejected", filled=0.0, avg_price=None,
+                error=result.get("error"))
+        result["db_order_id"] = db_order_id
+        return result
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order by ID.
@@ -1027,6 +1050,26 @@ class ExecutionEngine:
                 else:
                     pnl = (entry_price - current_price) * amount
 
+                # Persist the position lifecycle, a reduce-only close order,
+                # and the resulting fill (all additive; never raise).
+                # OrderRecord/FillRecord/PositionRecord imported at module level.
+                now = datetime.now(timezone.utc).isoformat()
+                pos_id = self._repo.open_position(PositionRecord(
+                    symbol=symbol, side=side, amount=abs(amount),
+                    entry_price=entry_price,
+                    opened_at=position.get("timestamp", now)))
+                self._repo.close_position(pos_id, closed_at=now,
+                                          close_price=current_price,
+                                          realized_pnl=round(pnl, 2))
+                close_oid = self._repo.record_order(OrderRecord(
+                    ts=now, symbol=symbol, side=close_side, order_type="market",
+                    amount=abs(amount), price=current_price, reduce_only=True,
+                    reason=reason, status="filled", filled=abs(amount),
+                    avg_price=current_price))
+                self._repo.record_fill(FillRecord(
+                    ts=now, symbol=symbol, side=close_side, amount=abs(amount),
+                    price=current_price, order_id=close_oid))
+
                 # Record trade
                 self._record_trade(position, current_price, pnl, reason)
 
@@ -1066,6 +1109,28 @@ class ExecutionEngine:
                         pnl = (close_price - entry_price) * amount
                     else:
                         pnl = (entry_price - close_price) * amount
+
+                    # Persist position lifecycle, reduce-only close order, fill.
+                    now = datetime.now(timezone.utc).isoformat()
+                    pos_id = self._repo.open_position(PositionRecord(
+                        symbol=symbol, side=side, amount=abs(amount),
+                        entry_price=entry_price,
+                        opened_at=position.get("timestamp", now)))
+                    self._repo.close_position(pos_id, closed_at=now,
+                                              close_price=close_price,
+                                              realized_pnl=round(pnl, 2))
+                    close_oid = self._repo.record_order(OrderRecord(
+                        ts=now, symbol=symbol, side=close_side,
+                        order_type="market", amount=abs(amount),
+                        price=close_price, reduce_only=True, reason=reason,
+                        status="filled", filled=abs(amount),
+                        avg_price=close_price,
+                        exchange_order_id=str(result.get("order_id") or "")
+                        or None))
+                    self._repo.record_fill(FillRecord(
+                        ts=now, symbol=symbol, side=close_side,
+                        amount=abs(amount), price=close_price,
+                        order_id=close_oid))
 
                     # Journal the trade and clear local SL/TP metadata so the
                     # closed position is no longer tracked.

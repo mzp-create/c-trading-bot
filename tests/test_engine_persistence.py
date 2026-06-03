@@ -45,3 +45,35 @@ def test_db_path_defaults_beside_trades_file(tmp_path):
               "exchange": {"rate_limit": 0.0}}
     eng = ExecutionEngine(config, mode="paper", trade_direction="both")
     assert (tmp_path / "sub" / "trading.db").exists()
+
+
+def test_execute_order_records_order(tmp_path):
+    eng = _engine(tmp_path)
+    result = eng.execute_order(symbol="BTC/USDT", side="buy", amount=0.001,
+                               price=100.0, order_type="market")
+    assert result.get("success") is True
+    assert result.get("db_order_id", -1) > 0
+    row = eng._repo._conn.execute(
+        "SELECT * FROM orders WHERE id=?", (result["db_order_id"],)).fetchone()
+    assert row["symbol"] == "BTC/USDT"
+    assert row["side"] == "buy"
+    assert row["reduce_only"] == 0
+    assert row["status"] == "filled"
+
+
+def test_close_position_records_position_and_fill(tmp_path):
+    eng = _engine(tmp_path)
+    eng.execute_order(symbol="BTC/USDT", side="buy", amount=0.001,
+                      price=100.0, order_type="market")
+    close = eng.close_position("BTC/USDT", reason="take_profit")
+    assert close.get("success") is True
+
+    pos = eng._repo._conn.execute(
+        "SELECT * FROM positions ORDER BY id DESC LIMIT 1").fetchone()
+    assert pos["status"] == "closed"
+    assert pos["realized_pnl"] is not None
+    close_orders = eng._repo._conn.execute(
+        "SELECT COUNT(*) FROM orders WHERE reduce_only=1").fetchone()[0]
+    assert close_orders == 1
+    fills = eng._repo._conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+    assert fills == 1
