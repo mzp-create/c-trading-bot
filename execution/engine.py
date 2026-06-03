@@ -10,7 +10,7 @@ Paper mode:
   - Applies exchange fees (0.1% taker, 0.0% maker per Bitfinex schedule)
   - Tracks PnL per position
   - Maintains simulated order book & trade history
-  - Stores trade log in data/trades.csv
+  - Stores trade log in the SQLite database (data/trading.db)
 
 Live mode:
   - Uses BitfinexClient.create_order() for real execution
@@ -23,7 +23,6 @@ Both modes:
 """
 
 import os
-import csv
 import time
 import math
 import logging
@@ -34,6 +33,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Optional, List, Dict, Any
 from copy import deepcopy
+
+from persistence import (
+    TradingRepository, OrderRecord, FillRecord, PositionRecord, TradeRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +99,15 @@ class ExecutionEngine:
         )
         self._last_api_call: float = 0.0
 
-        # Trade history CSV path (retained for the one-time importer source)
+        # Legacy trades.csv path — NO LONGER written by the engine (trades go
+        # to SQLite now). Retained only so the one-time CSV importer knows where
+        # the historical file lives, and to anchor the default DB path below.
         trades_path = self.data_config.get("trades_file", "data/trades.csv")
         self._trades_csv = Path(trades_path)
         self._trades_csv.parent.mkdir(parents=True, exist_ok=True)
 
         # SQLite persistence (single source of truth). Default the DB beside
         # the trades file. Construction never raises — see TradingRepository.
-        from persistence import TradingRepository
         db_path = self.data_config.get("db_file") or str(
             self._trades_csv.parent / "trading.db")
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -954,7 +958,6 @@ class ExecutionEngine:
         self._trade_history.append(record)
 
         # Persist to the database (single source of truth). Never raises.
-        from persistence import TradeRecord
         self._repo.record_trade(TradeRecord(
             ts=ts,
             symbol=position.get("symbol", ""),
