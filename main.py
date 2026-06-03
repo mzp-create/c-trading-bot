@@ -164,6 +164,40 @@ class TradingBot:
         self.log.info(f"🎯 Daily Target: ${self.config.get('trading', {}).get('daily_target', 100)}")
         self.log.info(f"⚙️  Max Positions: {self.config.get('trading', {}).get('max_open_positions', 6)}")
 
+    def _equity_snapshot_values(self):
+        """Best-effort (balance, equity) for the per-cycle snapshot.
+
+        Balance = starting capital + realized daily PnL. Equity adds any
+        unrealized PnL exposed on open positions (0 when unavailable). This is
+        an audit snapshot, refined when the WS account feed lands (Phase 3).
+        """
+        balance = self.initial_capital + self.daily_pnl
+        unrealized = 0.0
+        try:
+            for pos in self.executor.open_positions:
+                unrealized += float(pos.get("unrealized_pnl", 0.0) or 0.0)
+        except Exception:
+            pass
+        return round(balance, 2), round(balance + unrealized, 2)
+
+    def _record_decision_signal(self, symbol: str, decision: dict) -> None:
+        """Persist one decision signal per symbol per cycle (additive; never
+        raises). `_acted`/`_db_order_id` are present only when an order was
+        attempted; HOLD/blocked decisions record with acted=False."""
+        try:
+            from datetime import datetime, timezone
+            from persistence import SignalRecord
+            self.executor._repo.record_signal(SignalRecord(
+                ts=datetime.now(timezone.utc).isoformat(),
+                symbol=symbol,
+                decision=str(decision.get("signal", "HOLD")),
+                confidence=float(decision.get("confidence", 0.0) or 0.0),
+                strategy_breakdown=str(decision.get("reason", "")),
+                acted=bool(decision.get("_acted", False)),
+                order_id=decision.get("_db_order_id")))
+        except Exception as exc:
+            self.log.error("Signal record failed: %s", exc)
+
     def _flatten_ta(self, ta_dict: dict) -> dict:
         """Flatten nested TA dict — delegates to shared utility."""
         return flatten_ta(ta_dict)
@@ -532,6 +566,11 @@ class TradingBot:
                 take_profit_pct=take_profit_pct,
             )
 
+            # Surface the order outcome on the decision so the run loop can
+            # link the persisted signal to its order row.
+            decision["_acted"] = bool(result.get("success"))
+            decision["_db_order_id"] = result.get("db_order_id")
+
             if result.get('success'):
                 self.trade_count += 1
                 short_name = symbol.split('/')[0]
@@ -642,6 +681,7 @@ class TradingBot:
                         # Add display name for Telegram
                         result["symbol_name"] = s["name"]
                         cycle_results.append(result)
+                        self._record_decision_signal(s["name"], result)
 
                 # Send cycle summary to Telegram (every cycle)
                 if cycle_results:
@@ -665,6 +705,19 @@ class TradingBot:
                         regime=regime_str,
                         daily_target=daily_target,
                     )
+
+                    # Persist a per-cycle equity snapshot (additive; never raises).
+                    try:
+                        from datetime import datetime, timezone
+                        from persistence import EquitySnapshot
+                        bal, eq = self._equity_snapshot_values()
+                        self.executor._repo.snapshot_equity(EquitySnapshot(
+                            ts=datetime.now(timezone.utc).isoformat(),
+                            balance=bal, equity=eq,
+                            open_count=len(self.executor.open_positions),
+                            daily_pnl=round(self.daily_pnl, 2)))
+                    except Exception as exc:
+                        self.log.error("Equity snapshot failed: %s", exc)
 
                 # Check open positions for ALL symbols
                 self._check_positions()
