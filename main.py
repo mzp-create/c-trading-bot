@@ -20,7 +20,7 @@ import pandas as pd
 import logging
 import signal
 from pathlib import Path
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Optional, Dict, Any, List
 
 # Add project root to path
@@ -170,6 +170,8 @@ class TradingBot:
         Balance = starting capital + realized daily PnL. Equity adds any
         unrealized PnL exposed on open positions (0 when unavailable). This is
         an audit snapshot, refined when the WS account feed lands (Phase 3).
+        NOTE (Phase-1): balance = capital + *daily* PnL, so it steps at the
+        daily reset; equity == balance until the WS feed supplies unrealized.
         """
         balance = self.initial_capital + self.daily_pnl
         unrealized = 0.0
@@ -185,7 +187,6 @@ class TradingBot:
         raises). `_acted`/`_db_order_id` are present only when an order was
         attempted; HOLD/blocked decisions record with acted=False."""
         try:
-            from datetime import datetime, timezone
             from persistence import SignalRecord
             self.executor._repo.record_signal(SignalRecord(
                 ts=datetime.now(timezone.utc).isoformat(),
@@ -708,8 +709,9 @@ class TradingBot:
 
                     # Persist a per-cycle equity snapshot (additive; never raises).
                     try:
-                        from datetime import datetime, timezone
                         from persistence import EquitySnapshot
+                        # NOTE: equity == balance until the Phase-3 WS account feed
+                        # supplies per-position unrealized PnL.
                         bal, eq = self._equity_snapshot_values()
                         self.executor._repo.snapshot_equity(EquitySnapshot(
                             ts=datetime.now(timezone.utc).isoformat(),
