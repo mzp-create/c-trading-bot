@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
 
 from persistence.models import (
     OrderRecord, FillRecord, PositionRecord,
@@ -150,3 +151,57 @@ def test_db_failure_is_isolated(tmp_path):
                              avg_price=1.0) is None
     assert repo.close_position(1, closed_at="t", close_price=1.0,
                                realized_pnl=0.0) is None
+
+
+def test_reads_and_aggregates(tmp_path):
+    repo = _repo(tmp_path)
+    repo.record_trade(TR(ts="2026-06-01T10:00:00+00:00", symbol="BTC/USDT",
+                         side="buy", entry_price=100, close_price=110,
+                         amount=1, pnl=10.0))
+    repo.record_trade(TR(ts="2026-06-01T12:00:00+00:00", symbol="ETH/USDT",
+                         side="sell", entry_price=50, close_price=45,
+                         amount=2, pnl=-10.0))
+    repo.record_trade(TR(ts="2026-06-02T09:00:00+00:00", symbol="BTC/USDT",
+                         side="buy", entry_price=100, close_price=105,
+                         amount=1, pnl=5.0))
+
+    recent = repo.recent_trades(limit=2)
+    assert len(recent) == 2
+    assert recent[0].ts == "2026-06-02T09:00:00+00:00"   # newest first
+
+    day1 = repo.trades_between("2026-06-01T00:00:00+00:00",
+                               "2026-06-01T23:59:59+00:00")
+    assert len(day1) == 2
+    assert pytest.approx(repo.daily_pnl("2026-06-01")) == 0.0
+    assert pytest.approx(repo.daily_pnl("2026-06-02")) == 5.0
+
+
+def test_open_positions_and_equity_curve(tmp_path):
+    repo = _repo(tmp_path)
+    pid = repo.open_position(PR(symbol="BTC/USDT", side="buy", amount=1,
+                                entry_price=100, opened_at="2026-06-01T00:00:00+00:00"))
+    repo.open_position(PR(symbol="ETH/USDT", side="sell", amount=1,
+                          entry_price=50, opened_at="2026-06-01T01:00:00+00:00"))
+    repo.close_position(pid, closed_at="2026-06-01T02:00:00+00:00",
+                        close_price=110, realized_pnl=10.0)
+    opens = repo.open_positions()
+    assert len(opens) == 1
+    assert opens[0].symbol == "ETH/USDT"
+
+    repo.snapshot_equity(ES(ts="2026-06-01T00:00:00+00:00", balance=500,
+                            equity=500))
+    repo.snapshot_equity(ES(ts="2026-06-02T00:00:00+00:00", balance=510,
+                            equity=515))
+    curve = repo.equity_curve("2026-06-01T00:00:00+00:00",
+                              "2026-06-02T23:59:59+00:00")
+    assert len(curve) == 2
+    assert curve[-1].equity == 515
+
+
+def test_trade_exists(tmp_path):
+    repo = _repo(tmp_path)
+    repo.record_trade(TR(ts="2026-06-01T10:00:00+00:00", symbol="BTC/USDT",
+                         side="buy", entry_price=100, close_price=110,
+                         amount=0.5, pnl=5.0))
+    assert repo.trade_exists("2026-06-01T10:00:00+00:00", "BTC/USDT", 0.5) is True
+    assert repo.trade_exists("2026-06-01T10:00:00+00:00", "BTC/USDT", 0.9) is False

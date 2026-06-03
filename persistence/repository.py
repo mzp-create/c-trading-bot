@@ -146,3 +146,69 @@ class TradingRepository:
             self._conn.commit()
             return cur.lastrowid
         return self._safe(_do, -1)
+
+    # ── reads ────────────────────────────────────────────────────────────
+    def _trade_from_row(self, r) -> TradeRecord:
+        return TradeRecord(
+            ts=r["ts"], symbol=r["symbol"], side=r["side"],
+            entry_price=r["entry_price"], close_price=r["close_price"],
+            amount=r["amount"], pnl=r["pnl"], fee=r["fee"],
+            reason=r["reason"], position_id=r["position_id"])
+
+    def recent_trades(self, limit: int = 100) -> List[TradeRecord]:
+        def _do():
+            rows = self._conn.execute(
+                "SELECT * FROM trades ORDER BY ts DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [self._trade_from_row(r) for r in rows]
+        return self._safe(_do, [])
+
+    def trades_between(self, start: str, end: str) -> List[TradeRecord]:
+        def _do():
+            rows = self._conn.execute(
+                "SELECT * FROM trades WHERE ts >= ? AND ts <= ? ORDER BY ts",
+                (start, end)).fetchall()
+            return [self._trade_from_row(r) for r in rows]
+        return self._safe(_do, [])
+
+    def open_positions(self) -> List[PositionRecord]:
+        def _do():
+            rows = self._conn.execute(
+                "SELECT * FROM positions WHERE status='open' ORDER BY opened_at"
+            ).fetchall()
+            return [PositionRecord(
+                symbol=r["symbol"], side=r["side"], amount=r["amount"],
+                entry_price=r["entry_price"], opened_at=r["opened_at"],
+                status=r["status"], closed_at=r["closed_at"],
+                realized_pnl=r["realized_pnl"]) for r in rows]
+        return self._safe(_do, [])
+
+    def equity_curve(self, start: str, end: str) -> List[EquitySnapshot]:
+        def _do():
+            rows = self._conn.execute(
+                "SELECT * FROM equity_snapshots WHERE ts >= ? AND ts <= ? "
+                "ORDER BY ts", (start, end)).fetchall()
+            return [EquitySnapshot(
+                ts=r["ts"], balance=r["balance"], equity=r["equity"],
+                open_count=r["open_count"], daily_pnl=r["daily_pnl"])
+                for r in rows]
+        return self._safe(_do, [])
+
+    def daily_pnl(self, day: str) -> float:
+        """Sum of trade pnl whose ts date == `day` (YYYY-MM-DD)."""
+        def _do():
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE ts LIKE ?",
+                (day + "%",)).fetchone()
+            return float(row[0])
+        return self._safe(_do, 0.0)
+
+    def trade_exists(self, ts: str, symbol: str, amount: float) -> bool:
+        """Idempotency check for the CSV importer."""
+        def _do():
+            row = self._conn.execute(
+                "SELECT 1 FROM trades WHERE ts=? AND symbol=? "
+                "AND ABS(amount-?) < 1e-12 LIMIT 1",
+                (ts, symbol, amount)).fetchone()
+            return row is not None
+        return self._safe(_do, False)
