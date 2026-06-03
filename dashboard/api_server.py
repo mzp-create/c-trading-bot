@@ -187,22 +187,23 @@ def read_trades() -> list[dict]:
     running bot is never blocked.
     """
     import sqlite3
+    from contextlib import closing
     rows: list[dict] = []
     for db in _db_paths():
         try:
-            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                "SELECT ts, instance, symbol, side, entry_price, close_price, "
-                "amount, pnl, fee, reason, mode FROM trades ORDER BY ts")
-            for r in cur.fetchall():
-                d = dict(r)
-                d["timestamp"] = d.pop("ts")   # frontend expects 'timestamp'
-                rows.append(d)
-            conn.close()
+            with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute(
+                    "SELECT ts, instance, symbol, side, entry_price, "
+                    "close_price, amount, pnl, fee, reason, mode "
+                    "FROM trades ORDER BY ts")
+                for r in cur.fetchall():
+                    d = dict(r)
+                    d["timestamp"] = d.pop("ts")  # frontend expects 'timestamp'
+                    rows.append(d)
         except sqlite3.Error as exc:
             logger.error("Error reading trades DB %s: %s", db, exc)
-    rows.sort(key=lambda x: x.get("timestamp", ""))
+    rows.sort(key=lambda x: x.get("timestamp") or "")
     return rows
 
 
