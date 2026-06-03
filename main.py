@@ -131,7 +131,9 @@ class TradingBot:
         self.sentiment = SentimentAnalyzer(self.config)
         self.llm_reviewer = LLMReviewer(self.config)
         # Pass trade_direction to ExecutionEngine for validation
-        self.executor = ExecutionEngine(self.config, mode=mode, trade_direction=self.trade_direction)
+        self.executor = ExecutionEngine(self.config, mode=mode,
+                                        trade_direction=self.trade_direction,
+                                        instance=self.instance)
 
         self.log = self.logger.get_logger("Bot")
 

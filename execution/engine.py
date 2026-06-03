@@ -63,9 +63,11 @@ class ExecutionEngine:
         One of ``"long"``, ``"short"``, or ``"both"``. Filters order direction.
     """
 
-    def __init__(self, config: dict, mode: str = "paper", trade_direction: str = "both"):
+    def __init__(self, config: dict, mode: str = "paper",
+                 trade_direction: str = "both", instance: str = "default"):
         self.config = config
         self.mode = mode
+        self.instance = instance
         self.trade_direction = trade_direction.lower()
         self.trading_config = config.get("trading", {})
         self.data_config = config.get("data", {})
@@ -94,10 +96,19 @@ class ExecutionEngine:
         )
         self._last_api_call: float = 0.0
 
-        # Trade history CSV path
+        # Trade history CSV path (retained for the one-time importer source)
         trades_path = self.data_config.get("trades_file", "data/trades.csv")
         self._trades_csv = Path(trades_path)
         self._trades_csv.parent.mkdir(parents=True, exist_ok=True)
+
+        # SQLite persistence (single source of truth). Default the DB beside
+        # the trades file. Construction never raises — see TradingRepository.
+        from persistence import TradingRepository
+        db_path = self.data_config.get("db_file") or str(
+            self._trades_csv.parent / "trading.db")
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._repo = TradingRepository(db_path, instance=self.instance,
+                                       mode=self.mode)
 
         # Wire up BitfinexClient for live mode
         self._client = None
@@ -927,9 +938,10 @@ class ExecutionEngine:
         pnl: float,
         reason: str,
     ):
-        """Record a completed trade to internal history and CSV."""
+        """Record a completed trade to in-memory history and the database."""
+        ts = datetime.now(timezone.utc).isoformat()
         record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": ts,
             "symbol": position.get("symbol", ""),
             "side": position.get("side", ""),
             "entry_price": position.get("entry_price", 0),
@@ -941,16 +953,18 @@ class ExecutionEngine:
         }
         self._trade_history.append(record)
 
-        # Append to CSV
-        try:
-            file_exists = self._trades_csv.exists()
-            with open(self._trades_csv, "a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=record.keys())
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow(record)
-        except Exception as exc:
-            self._log.error("Failed to write trade to CSV: %s", exc)
+        # Persist to the database (single source of truth). Never raises.
+        from persistence import TradeRecord
+        self._repo.record_trade(TradeRecord(
+            ts=ts,
+            symbol=position.get("symbol", ""),
+            side=position.get("side", ""),
+            entry_price=float(position.get("entry_price", 0) or 0),
+            close_price=float(close_price),
+            amount=abs(float(position.get("amount", 0) or 0)),
+            pnl=round(pnl, 2),
+            reason=reason,
+        ))
 
     def close_position(self, symbol: str, reason: str = "manual") -> Dict[str, Any]:
         """Close an open position for a symbol.

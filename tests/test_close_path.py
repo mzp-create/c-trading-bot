@@ -90,8 +90,8 @@ def test_paper_close_success_records_trade_and_clears_meta(tmp_path):
     # meta cleared, position gone
     assert "BTC/USDT" not in eng._live_position_meta
     assert all(p.get("symbol") != "BTC/USDT" for p in eng._open_positions)
-    # CSV written
-    assert Path(cfg["data"]["trades_file"]).exists()
+    # Trade persisted to the database (CSV write was dropped in favour of SQLite)
+    assert len(eng._repo.recent_trades(limit=1)) == 1
 
 
 # ---------------------------------------------------------------------------
