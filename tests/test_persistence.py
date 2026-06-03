@@ -135,9 +135,18 @@ def test_db_failure_is_isolated(tmp_path):
     repo._conn.close()  # subsequent writes will raise sqlite3.ProgrammingError
     assert repo.record_order(OR(ts="t", symbol="X", side="buy",
                                 order_type="market", amount=1.0)) == -1
+    assert repo.record_fill(FR(ts="t", symbol="X", side="sell",
+                               amount=1.0, price=1.0)) == -1
+    assert repo.open_position(PR(symbol="X", side="buy", amount=1.0,
+                                 entry_price=1.0, opened_at="t")) == -1
     assert repo.record_trade(TR(ts="t", symbol="X", side="buy",
                                 entry_price=1, close_price=1,
                                 amount=1, pnl=0)) == -1
+    assert repo.snapshot_equity(ES(ts="t", balance=1.0, equity=1.0)) == -1
+    assert repo.record_signal(SR(ts="t", symbol="X", decision="HOLD",
+                                 confidence=0.0)) == -1
     # update/close return None without raising
     assert repo.update_order(1, status="filled", filled=1.0,
                              avg_price=1.0) is None
+    assert repo.close_position(1, closed_at="t", close_price=1.0,
+                               realized_pnl=0.0) is None

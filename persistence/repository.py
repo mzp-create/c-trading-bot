@@ -7,7 +7,7 @@ trading path never crashes because of persistence.
 
 import logging
 import sqlite3
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from persistence.schema import connect, init_db
 from persistence.models import (
@@ -29,18 +29,18 @@ class TradingRepository:
             init_db(self._conn)
             log.info("TradingRepository ready at %s (instance=%s, mode=%s)",
                      db_path, instance, mode)
-        except sqlite3.Error as exc:
+        except Exception as exc:
             log.error("Persistence init FAILED at %s: %s — continuing without DB",
                       db_path, exc)
             self._conn = None
 
     # ── internal ─────────────────────────────────────────────────────────
-    def _safe(self, fn, default):
+    def _safe(self, fn: Callable, default):
         if self._conn is None:
             return default
         try:
             return fn()
-        except sqlite3.Error as exc:
+        except Exception as exc:
             log.error("Persistence write failed: %s", exc)
             return default
 
@@ -100,6 +100,8 @@ class TradingRepository:
 
     def close_position(self, position_id: int, *, closed_at: str,
                        close_price: float, realized_pnl: float) -> None:
+        # close_price is intentionally not stored on positions — the trades
+        # row carries it. Kept in the signature for caller-API symmetry.
         def _do():
             self._conn.execute(
                 "UPDATE positions SET status='closed', closed_at=?, "
