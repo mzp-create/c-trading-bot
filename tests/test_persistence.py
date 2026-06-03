@@ -205,3 +205,20 @@ def test_trade_exists(tmp_path):
                          amount=0.5, pnl=5.0))
     assert repo.trade_exists("2026-06-01T10:00:00+00:00", "BTC/USDT", 0.5) is True
     assert repo.trade_exists("2026-06-01T10:00:00+00:00", "BTC/USDT", 0.9) is False
+
+
+import sqlite3 as _sqlite3
+
+
+def test_concurrent_read_under_wal(tmp_path):
+    """A read-only connection sees committed rows while the writer is open."""
+    db = str(tmp_path / "trading.db")
+    repo = TradingRepository(db, instance="long", mode="paper")
+    repo.record_trade(TR(ts="2026-06-01T10:00:00+00:00", symbol="BTC/USDT",
+                         side="buy", entry_price=100, close_price=110,
+                         amount=1, pnl=10.0))
+    # Writer connection stays open (repo._conn). Open a second read-only conn.
+    reader = _sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    n = reader.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    reader.close()
+    assert n == 1
