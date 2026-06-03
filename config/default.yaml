@@ -153,5 +153,6 @@ data:
   ohlcv_dir: "data/ohlcv/"
   models_dir: "data/models/"
   trades_file: "data/trades.csv"
+  db_file: "data/trading.db"
   equity_file: "data/equity.csv"
   log_file: "logs/bot.log"

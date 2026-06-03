@@ -171,5 +171,6 @@ data:
   ohlcv_dir: "instances/long/data/ohlcv/"
   models_dir: "instances/long/data/models/"
   trades_file: "instances/long/data/trades.csv"
+  db_file: "instances/long/data/trading.db"
   equity_file: "instances/long/data/equity.csv"
   log_file: "instances/long/logs/bot.log"

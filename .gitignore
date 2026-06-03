@@ -8,6 +8,10 @@
 data/ohlcv/
 data/models/*.joblib
 data/trades.csv
+# SQLite database (runtime artifact, one per instance)
+*.db
+*.db-wal
+*.db-shm
 
 # Logs
 logs/
