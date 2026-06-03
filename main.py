@@ -27,6 +27,29 @@ from typing import Optional, Dict, Any, List
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+# Load .env file if it exists (for API keys)
+def _load_env_file():
+    """Load .env file into os.environ."""
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Handle both formats: KEY=value and export KEY=value
+            if line.startswith("export "):
+                line = line[7:]  # Remove 'export ' prefix
+            if "=" in line:
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")  # Remove quotes
+                if key and key not in os.environ:
+                    os.environ[key] = val
+
+_load_env_file()
+
 # --- Config helpers ---
 
 def _resolve_env_vars(value):
@@ -68,12 +91,19 @@ from monitoring.telegram_alerts import TelegramNotifier
 
 
 class TradingBot:
-    """Main trading bot orchestrator."""
+    """Main trading bot orchestrator.
+    
+    Supports dual-instance trading with direction filtering:
+    - Instance "long" only trades BUY signals
+    - Instance "short" only trades SELL signals
+    """
 
-    def __init__(self, config_path: str = "config/default.yaml", mode: str = "paper"):
+    def __init__(self, config_path: str = "config/default.yaml", mode: str = "paper", 
+                 instance: str = "default"):
         self.config = load_config(config_path)
 
         self.mode = mode
+        self.instance = instance
         self.running = False
         self.paused = False
         self.start_time = None
@@ -83,18 +113,25 @@ class TradingBot:
         self._last_reset_date: Optional[date] = None
         self._cached_1h_dfs: Dict[str, Optional[pd.DataFrame]] = {}
 
+        # Get trade direction from config or default based on instance name
+        self.trade_direction = self.config.get('trading', {}).get('trade_direction', 'both')
+        if instance in ('long', 'short'):
+            self.trade_direction = instance  # Override from instance name
+        
         # Initialize components
         self.logger = BotLogger(self.config)
         self.telegram = TelegramNotifier(self.config)
         self.collector = MarketDataCollector(self.config)
         self.analyzer = TechnicalAnalyzer(self.config)
         self.ml_predictor = MLPredictor(self.config)
-        self.strategies = StrategySelector(self.config)
+        # Pass trade_direction to StrategySelector for signal filtering
+        self.strategies = StrategySelector(self.config, trade_direction=self.trade_direction)
         self.risk = RiskManager(self.config)
         self.regime_detector = MarketRegimeDetector(self.config)
         self.sentiment = SentimentAnalyzer(self.config)
         self.llm_reviewer = LLMReviewer(self.config)
-        self.executor = ExecutionEngine(self.config, mode=mode)
+        # Pass trade_direction to ExecutionEngine for validation
+        self.executor = ExecutionEngine(self.config, mode=mode, trade_direction=self.trade_direction)
 
         self.log = self.logger.get_logger("Bot")
 
@@ -220,7 +257,7 @@ class TradingBot:
             sell_score /= total_weight
 
         # Decision
-        confidence_threshold = 0.30
+        confidence_threshold = 0.20
         if buy_score > sell_score and buy_score > confidence_threshold:
             signal = "BUY"
             confidence = buy_score
@@ -375,6 +412,15 @@ class TradingBot:
                 self.log.info(f"[{symbol}] HOLD — {decision['reason']}")
                 return decision
 
+            # ── direction filter for dual-instance trading ──
+            # The direction rule (long-only blocks SELL, short-only blocks BUY
+            # unless closing/covering) is now enforced solely by the executor's
+            # execute_order, which is the single source of truth because it can
+            # see live positions. It returns success=False with a descriptive
+            # reason when a signal is blocked; that is logged where the order is
+            # placed below. No inline pre-filter here to avoid duplicating the
+            # check across layers.
+
             # Get fresh market data for regime detection (reuse cached 1h when possible — P2-13)
             regime = MarketRegime.RANGING
             regime_params = None
@@ -492,8 +538,12 @@ class TradingBot:
                     'RANGING': '📊',
                     'VOLATILE': '🌪️',
                 }.get(regime.value, '🤖')
+                
+                # Signal emoji for BUY vs SELL
+                signal_emoji = "🟢" if decision['signal'] == "BUY" else "🔴"
+                
                 msg = (f"{emoji_regime} **Trade Executed**\n"
-                       f"*{short_name}* — {decision['signal']}\n"
+                       f"{signal_emoji} *{short_name}* — {decision['signal']}\n"
                        f"Amount: {position_size:.6f}\n"
                        f"Price: ${price:.2f}\n"
                        f"Regime: {regime.value}\n"
@@ -502,7 +552,14 @@ class TradingBot:
                 self.telegram.send(msg)
                 self.log.info(f"[{symbol}] Trade executed: {result}")
             else:
-                self.log.error(f"[{symbol}] Order failed: {result.get('error', 'Unknown')}")
+                err = result.get('error', 'Unknown')
+                # A blocked direction (dual-instance filter, enforced by the
+                # executor) is expected, not a failure — log it at INFO like the
+                # old inline filter did. Everything else is a real order failure.
+                if "blocked" in str(err).lower():
+                    self.log.info(f"[{symbol}] Order blocked: {err}")
+                else:
+                    self.log.error(f"[{symbol}] Order failed: {err}")
 
             return decision  # Return analysis result for cycle summary
 
@@ -520,11 +577,30 @@ class TradingBot:
         signal.signal(signal.SIGTERM, self._handle_shutdown)
 
         symbols_str = ', '.join([s['name'] for s in self.symbols])
-        self.telegram.send(f"🤖 **Bot Started**\n"
+        
+        # Instance-specific startup message
+        if self.instance == 'long':
+            startup_emoji = "🟢"
+            instance_name = "LONG Bot"
+            direction_note = "\n📍 Only BUY signals (long positions)"
+        elif self.instance == 'short':
+            startup_emoji = "🔴"
+            instance_name = "SHORT Bot"
+            direction_note = "\n📍 Only SELL signals (short positions)"
+        else:
+            startup_emoji = "🤖"
+            instance_name = "Bot"
+            direction_note = ""
+        
+        self.telegram.send(f"{startup_emoji} **{instance_name} Started**{direction_note}\n"
                           f"Mode: {self.mode.upper()}\n"
                           f"Capital: ${self.initial_capital}\n"
                           f"Target: ${self.config.get('trading', {}).get('daily_target', 100)}/day\n"
                           f"Symbols: {symbols_str}")
+
+        # Sync existing positions from exchange (for live mode)
+        if self.mode == "live":
+            self.executor.sync_positions_at_startup()
 
         # On first run, train ML models for each symbol
         for s in self.symbols:
@@ -536,8 +612,11 @@ class TradingBot:
                 limit=self.config.get('ml', {}).get('min_train_samples', 500)
             )
             if df is not None:
-                self.ml_predictor.train(df, symbol=symbol)
-                self.log.info(f"[{symbol}] ML model training complete")
+                result = self.ml_predictor.train(df, symbol=symbol)
+                if result.get('status') == 'success':
+                    self.log.info(f"[{symbol}] ML model training complete")
+                else:
+                    self.log.warning(f"[{symbol}] ML training failed: {result.get('reason', 'unknown')}")
             else:
                 self.log.warning(f"[{symbol}] No data available for ML training")
 
@@ -623,27 +702,57 @@ class TradingBot:
                     continue
                 updated = self.risk.update_position(pos, current_price)
                 if updated.get('closed'):
-                    pnl = updated.get('pnl', 0.0)
-                    self.daily_pnl += pnl
-                    self.consecutive_losses = self.consecutive_losses + 1 if pnl < 0 else 0
-
+                    reason = updated.get('reason', 'SL/TP')
+                    side = pos.get('side', 'buy').upper()
                     short_name = symbol.split('/')[0]
-                    emoji = "🟢" if pnl > 0 else "🔴"
-                    msg = (f"{emoji} **Position Closed**\n"
-                           f"{short_name}: ${pnl:.2f}\n"
-                           f"Reason: {updated.get('reason', 'Unknown')}\n"
-                           f"Daily PnL: ${self.daily_pnl:.2f}")
-                    self.telegram.send(msg)
-                    self.log.info(f"[{symbol}] Position closed: {updated}")
+                    side_emoji = "🟢" if side == "BUY" else "🔴"
 
-                    # Actually close position on exchange in live mode
                     if self.mode == "live":
+                        # Live mode: close on exchange FIRST. Only book PnL and
+                        # notify if the exchange confirms the close. On failure the
+                        # position stays on the exchange and is retried next cycle
+                        # (avoids daily_pnl double-counting from re-detection).
                         close_result = self.executor.close_position(
-                            symbol, reason=updated.get('reason', 'SL/TP')
+                            symbol, reason=reason
                         )
                         if not close_result.get('success'):
-                            self.log.error(f"[{symbol}] Failed to close position on exchange: {close_result.get('error')}")
+                            self.log.error(
+                                f"[{symbol}] Failed to close position on exchange: "
+                                f"{close_result.get('error')} — will retry next cycle"
+                            )
+                            # Do NOT touch daily_pnl, do NOT send a closed message,
+                            # and leave tracking intact so it is retried.
+                            continue
+
+                        # Use REALIZED pnl from the exchange close, not the estimate.
+                        pnl = float(close_result.get('pnl', 0.0))
+                        self.daily_pnl += pnl
+                        self.consecutive_losses = self.consecutive_losses + 1 if pnl < 0 else 0
+
+                        emoji = "🟢" if pnl > 0 else "🔴"
+                        msg = (f"{emoji} **Position Closed**\n"
+                               f"{side_emoji} {short_name} {side}\n"
+                               f"PnL: ${pnl:+.2f}\n"
+                               f"Reason: {reason}\n"
+                               f"Daily PnL: ${self.daily_pnl:+.2f}")
+                        self.telegram.send(msg)
+                        self.log.info(f"[{symbol}] Position closed: {close_result}")
+                        # Executor owns removing the position from tracking.
                     else:
+                        # Paper mode: update_position closing is authoritative.
+                        pnl = updated.get('pnl', 0.0)
+                        self.daily_pnl += pnl
+                        self.consecutive_losses = self.consecutive_losses + 1 if pnl < 0 else 0
+
+                        emoji = "🟢" if pnl > 0 else "🔴"
+                        msg = (f"{emoji} **Position Closed**\n"
+                               f"{side_emoji} {short_name} {side}\n"
+                               f"PnL: ${pnl:+.2f}\n"
+                               f"Reason: {reason}\n"
+                               f"Daily PnL: ${self.daily_pnl:+.2f}")
+                        self.telegram.send(msg)
+                        self.log.info(f"[{symbol}] Position closed: {updated}")
+
                         # Paper mode: just remove from list
                         try:
                             self.executor._open_positions.remove(pos)
@@ -737,9 +846,11 @@ def main():
                        help='Config file path')
     parser.add_argument('--symbol', help='Override trading symbol')
     parser.add_argument('--capital', type=float, help='Override initial capital')
+    parser.add_argument('--instance', choices=['long', 'short', 'default'],
+                       default='default', help='Trading instance type (long=only BUY, short=only SELL)')
     args = parser.parse_args()
 
-    bot = TradingBot(config_path=args.config, mode=args.mode)
+    bot = TradingBot(config_path=args.config, mode=args.mode, instance=args.instance)
 
     if args.mode == 'backtest':
         from backtest.engine import BacktestEngine

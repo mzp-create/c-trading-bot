@@ -59,18 +59,21 @@ class ExecutionEngine:
         Full bot configuration.
     mode : str
         One of ``"paper"`` or ``"live"``.  Default ``"paper"``.
+    trade_direction : str
+        One of ``"long"``, ``"short"``, or ``"both"``. Filters order direction.
     """
 
-    def __init__(self, config: dict, mode: str = "paper"):
+    def __init__(self, config: dict, mode: str = "paper", trade_direction: str = "both"):
         self.config = config
         self.mode = mode
+        self.trade_direction = trade_direction.lower()
         self.trading_config = config.get("trading", {})
         self.data_config = config.get("data", {})
         self.risk_config = config.get("risk", {})
 
         self._log = logging.getLogger(f"{__name__}.ExecutionEngine")
         self._log.info(
-            "ExecutionEngine initialised (mode=%s)", mode
+            "ExecutionEngine initialised (mode=%s, direction=%s)", mode, self.trade_direction
         )
 
         # --- Internal state ---
@@ -123,12 +126,22 @@ class ExecutionEngine:
     def _merge_live_positions_with_meta(self) -> List[Dict[str, Any]]:
         """Merge exchange-fetched positions with local SL/TP tracking data."""
         merged = []
+        # Start with exchange-fetched positions
         for pos in self._cached_live_positions:
             symbol = pos.get("symbol", "")
             # Merge with local metadata (SL/TP set at entry)
             meta = self._live_position_meta.get(symbol, {})
             merged_pos = {**pos, **meta}
             merged.append(merged_pos)
+        
+        # Also include locally tracked positions that aren't in exchange cache
+        # (Bitfinex margin shorts don't appear in fetch_positions)
+        exchange_symbols = {p.get("symbol") for p in self._cached_live_positions}
+        for pos in self._open_positions:
+            symbol = pos.get("symbol", "")
+            if symbol not in exchange_symbols:
+                merged.append(pos)
+        
         return merged
 
     def _update_position_cache(self):
@@ -144,6 +157,82 @@ class ExecutionEngine:
             self._cached_live_positions = positions
         except Exception as exc:
             self._log.error("Failed to update position cache: %s", exc)
+
+    def _get_position_for_direction_check(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get position for a symbol to validate direction filtering.
+        
+        Returns position dict with 'side' key ('buy' or 'sell') if found,
+        None if no position exists.
+        """
+        for pos in self.open_positions:
+            if pos.get("symbol") == symbol:
+                # Normalize side to 'buy' or 'sell'
+                side = pos.get("side", "")
+                if side in ("buy", "long"):
+                    return {**pos, "side": "buy"}
+                elif side in ("sell", "short"):
+                    return {**pos, "side": "sell"}
+        return None
+
+    def sync_positions_at_startup(self):
+        """Sync positions from exchange at bot startup and init SL/TP tracking.
+        
+        This ensures that positions opened before the bot started are
+        properly tracked with stop-loss and take-profit levels.
+        """
+        if not self._client or self.mode == "paper":
+            return
+        
+        self._log.info("Syncing positions from exchange at startup...")
+        try:
+            positions = self._get_live_positions()
+            self._cached_live_positions = positions
+            
+            # Initialize SL/TP metadata for each position from risk config
+            sl_pct = self.risk_config.get("stop_loss_pct", 2.0)
+            tp_pct = self.risk_config.get("take_profit_pct", 4.0)
+            
+            synced_count = 0
+            for pos in positions:
+                symbol = pos.get("symbol", "")
+                entry_price = pos.get("entry_price", 0)
+                side = pos.get("side", "buy")
+                
+                if not symbol or entry_price <= 0:
+                    continue
+                
+                # Calculate SL/TP levels
+                sl_pct_decimal = sl_pct / 100.0
+                tp_pct_decimal = tp_pct / 100.0
+                
+                if side == "buy":
+                    stop_loss = entry_price * (1.0 - sl_pct_decimal)
+                    take_profit = entry_price * (1.0 + tp_pct_decimal)
+                else:
+                    stop_loss = entry_price * (1.0 + sl_pct_decimal)
+                    take_profit = entry_price * (1.0 - tp_pct_decimal)
+                
+                # Store in metadata
+                self._live_position_meta[symbol] = {
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "trailing_stop": self.risk_config.get("trailing_stop", True),
+                    "trailing_activation": self.risk_config.get("trailing_stop_activation", 2.0),
+                    "trailing_distance": self.risk_config.get("trailing_stop_distance", 0.5),
+                    "highest_price": entry_price if side == "buy" else 0,
+                    "lowest_price": entry_price if side == "sell" else float('inf'),
+                }
+                
+                self._log.info(
+                    f"  Synced {symbol} {side.upper()}: entry=${entry_price:.2f}, "
+                    f"SL=${stop_loss:.2f}, TP=${take_profit:.2f}"
+                )
+                synced_count += 1
+            
+            self._log.info(f"Position sync complete: {synced_count} position(s) loaded")
+            
+        except Exception as exc:
+            self._log.error("Failed to sync positions at startup: %s", exc)
 
     # ── order execution ───────────────────────────────────────────────────
 
@@ -188,6 +277,25 @@ class ExecutionEngine:
 
         if amount <= 0 or price <= 0:
             return {"success": False, "error": "Invalid amount or price"}
+
+        # ── direction validation for dual-instance trading ────────────────
+        if self.trade_direction == "long" and side == "sell":
+            # Allow sell only if closing existing long position
+            existing_pos = self._get_position_for_direction_check(symbol)
+            if not existing_pos or existing_pos.get("side") != "buy":
+                return {
+                    "success": False, 
+                    "error": f"SELL blocked in long-only mode (no long position to close for {symbol})"
+                }
+        
+        if self.trade_direction == "short" and side == "buy":
+            # Allow buy only if closing existing short position (covering)
+            existing_pos = self._get_position_for_direction_check(symbol)
+            if not existing_pos or existing_pos.get("side") != "sell":
+                return {
+                    "success": False,
+                    "error": f"BUY blocked in short-only mode (no short position to cover for {symbol})"
+                }
 
         self._log.info(
             "Executing %s %s %.6f @ %.2f (%s)",
@@ -260,70 +368,6 @@ class ExecutionEngine:
     def get_open_positions(self) -> List[Dict[str, Any]]:
         """Return all open positions."""
         return self.open_positions  # delegates to property
-
-    def close_position(self, symbol: str) -> Dict[str, Any]:
-        """Close a specific position by symbol.
-
-        Returns result dict with keys ``success``, ``pnl``, ``reason``.
-        """
-        self._log.info("Closing position for %s", symbol)
-
-        if self.mode == "paper":
-            for i, pos in enumerate(self._open_positions):
-                if pos.get("symbol") == symbol:
-                    # Simulate closing at current price
-                    entry = float(pos.get("entry_price", 0))
-                    amount = float(pos.get("amount", 0))
-                    side = pos.get("side", "buy")
-
-                    # Use a simulated close price (entry ± small random move)
-                    close_price = entry * (1.0 + random.uniform(-0.005, 0.005))
-                    if side == "buy":
-                        pnl = (close_price - entry) * amount
-                    else:
-                        pnl = (entry - close_price) * amount
-
-                    # Subtract fees
-                    fee = close_price * amount * TAKER_FEE
-                    pnl -= fee
-
-                    # Update balance
-                    self._update_paper_balance_on_close(symbol, side, amount, close_price, fee)
-
-                    closed = self._open_positions.pop(i)
-                    self._record_trade(closed, close_price, pnl, "manual_close")
-
-                    self._log.info(
-                        "Position closed: symbol=%s pnl=%.2f", symbol, pnl
-                    )
-                    return {
-                        "success": True,
-                        "pnl": round(pnl, 2),
-                        "reason": "Manual close",
-                        "close_price": close_price,
-                    }
-
-            return {"success": False, "reason": f"No open position for {symbol}"}
-
-        # Live
-        if self._client:
-            try:
-                pos = self._client.fetch_position(symbol)
-                if pos.get("contracts", 0) <= 0:
-                    return {"success": False, "reason": "No position"}
-                side = "sell" if pos.get("side") == "long" else "buy"
-                amount = abs(pos.get("contracts", 0))
-                result = self._client.create_order(
-                    symbol, "market", side, amount
-                )
-                if result.get("success", True) and "error" not in result:
-                    return {"success": True, "reason": "Live close"}
-                return {"success": False, "error": result.get("error")}
-            except Exception as exc:
-                self._log.error("Failed to close live position: %s", exc)
-                return {"success": False, "error": str(exc)}
-
-        return {"success": False, "reason": "No exchange client"}
 
     def close_all_positions(self):
         """Close all open positions."""
@@ -705,12 +749,20 @@ class ExecutionEngine:
             self._log.error("Live order failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
-        if "error" in result and result.get("error"):
-            return {"success": False, "error": result["error"]}
+        # Normalized contract: success=False means the order was rejected.
+        if not result.get("success"):
+            return {"success": False, "error": result.get("error") or "Order rejected"}
 
-        order_id = result.get("id", f"live_{int(time.time())}")
-        fill_price = float(result.get("price", price))
-        filled = float(result.get("filled", amount))
+        order_id = result.get("id") or f"live_{int(time.time())}"
+        fill_price = float(result.get("average") or price or 0)
+        filled = float(result.get("filled", 0) or 0)
+        fee_cost = float(((result.get("raw") or {}).get("fee") or {}).get("cost", 0.0) or 0.0)
+        
+        # For market orders that show 0 filled, assume full fill
+        # (the order should fill immediately, polling is done in bitfinex_client)
+        if order_type == "market" and filled == 0:
+            filled = amount
+            self._log.info("Market order assumed filled: %s @ %s", amount, fill_price)
 
         # Record position locally for tracking
         pos = {
@@ -720,7 +772,7 @@ class ExecutionEngine:
             "amount": filled,
             "entry_price": fill_price,
             "order_type": order_type,
-            "fee": float(result.get("fee", {}).get("cost", 0.0)),
+            "fee": fee_cost,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -772,41 +824,95 @@ class ExecutionEngine:
             "order_id": order_id,
             "filled_price": round(fill_price, 2),
             "amount": filled,
-            "fee": float(result.get("fee", {}).get("cost", 0.0)),
+            "fee": fee_cost,
             "side": side,
         }
 
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        """Normalize any Bitfinex symbol representation to the unified display
+        form used throughout the bot (e.g. "BTC/USDT").
+
+        Accepts all three formats:
+          - t-format:   "tBTCUST"          -> "BTC/USDT"
+          - derivative: "BTC/USDT:USDT"    -> "BTC/USDT"
+          - unified:    "BTC/USDT"         -> "BTC/USDT"
+        """
+        if not symbol:
+            return ""
+        s = symbol.strip()
+
+        # Strip CCXT derivative suffix ":USDT" / ":USD" etc.
+        if ":" in s:
+            s = s.split(":", 1)[0]
+
+        # Already unified "BASE/QUOTE"
+        if "/" in s:
+            return s
+
+        # Bitfinex t-format e.g. tBTCUST / tBTCUSD
+        if s.startswith("t") and s[1:].isupper() and len(s) > 3:
+            body = s[1:]
+            if body.endswith("UST"):
+                return f"{body[:-3]}/USDT"
+            if body.endswith("USD"):
+                return f"{body[:-3]}/USD"
+            for quote in ("USDT", "BTC", "ETH"):
+                if body.endswith(quote):
+                    return f"{body[:-len(quote)]}/{quote}"
+        return s
+
     def _get_live_positions(self) -> List[Dict[str, Any]]:
-        """Fetch current positions from the exchange for ALL configured symbols (P1-10)."""
+        """Fetch current positions from the exchange for ALL configured symbols (P1-10).
+        
+        Uses fetch_positions() to get all positions at once from Bitfinex.
+        """
         if not self._client:
             return []
         try:
+            # Use fetch_positions to get ALL positions at once
+            raw_positions = self._client.fetch_positions()
+            
+            # Build symbol name mapping from config, keyed on the NORMALIZED
+            # display form so it matches whatever format fetch_positions returns.
             symbols_config = self.trading_config.get("symbols", [])
             if not symbols_config:
                 symbols_config = [{"name": self.trading_config.get("symbol", "BTC/USDT"),
                                    "symbol": "tBTCUST"}]
 
-            positions = []
+            # Map every known representation (tBTCUST, BTC/USDT:USDT, BTC/USDT)
+            # -> the config display name (e.g. "BTC/USDT").
+            symbol_map = {}
             for sym_config in symbols_config:
                 exchange_symbol = sym_config.get("symbol", "")
                 name = sym_config.get("name", exchange_symbol)
-                if not exchange_symbol:
+                for key in (exchange_symbol, name):
+                    norm = self._normalize_symbol(key)
+                    if norm:
+                        symbol_map[norm] = name
+
+            # Convert positions to internal format
+            positions = []
+            for pos in raw_positions:
+                exchange_symbol = pos.get("symbol", "")
+                contracts = float(pos.get("contracts", 0))
+                if contracts == 0:
                     continue
-                try:
-                    pos = self._client.fetch_position(exchange_symbol)
-                    contracts = float(pos.get("contracts", 0))
-                    if contracts == 0:
-                        continue
-                    side = "buy" if contracts > 0 else "sell"
-                    positions.append({
-                        "symbol": name,
-                        "side": side,
-                        "amount": abs(contracts),
-                        "entry_price": float(pos.get("entryPrice", 0)),
-                        "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
-                    })
-                except Exception as sym_exc:
-                    self._log.warning("Failed to fetch position for %s: %s", exchange_symbol, sym_exc)
+
+                # Normalize the exchange symbol to the unified display form so
+                # downstream SL/TP + close lookups (keyed "BTC/USDT") match.
+                norm = self._normalize_symbol(exchange_symbol)
+                display_name = symbol_map.get(norm, norm or exchange_symbol)
+                side = "buy" if pos.get("side") == "long" else "sell"
+                
+                positions.append({
+                    "symbol": display_name,
+                    "side": side,
+                    "amount": contracts,
+                    "entry_price": float(pos.get("entryPrice", 0)),
+                    "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
+                })
+            
             return positions
         except Exception as exc:
             self._log.error("Failed to fetch live positions: %s", exc)
@@ -859,7 +965,8 @@ class ExecutionEngine:
         Returns
         -------
         dict
-            Close result with keys 'success', 'pnl', 'order_id', 'error'.
+            Close result: {success: bool, pnl: float, price: float,
+            error: str|None}.
         """
         self._log.info(f"Closing position for {symbol} (reason: {reason})")
 
@@ -870,8 +977,22 @@ class ExecutionEngine:
                 position = pos
                 break
 
+        # Live mode: open_positions reads a per-cycle cache. When close_position
+        # is called outside the run loop (Telegram /close, manual) that cache may
+        # be stale/empty, so refresh once from the exchange before giving up —
+        # otherwise we would fail to close a position that really exists.
+        if not position and self.mode != "paper":
+            self._update_position_cache()
+            for pos in self.open_positions:
+                if pos.get("symbol") == symbol:
+                    position = pos
+                    break
+
         if not position:
-            return {"success": False, "error": f"No open position for {symbol}"}
+            return {
+                "success": False, "pnl": 0.0, "price": 0.0,
+                "error": f"No open position for {symbol}",
+            }
 
         side = position.get("side", "buy")
         amount = float(position.get("amount", 0))
@@ -882,8 +1003,8 @@ class ExecutionEngine:
 
         try:
             if self.mode == "paper":
-                # Paper mode: simulate closing
-                current_price = self._paper_balance.get(symbol, {}).get("price", entry_price)
+                # Paper mode: simulate closing at the current market price.
+                current_price = self._current_price(symbol, entry_price)
                 if close_side == "sell":
                     pnl = (current_price - entry_price) * amount
                 else:
@@ -895,49 +1016,84 @@ class ExecutionEngine:
                 # Remove from tracking
                 if position in self._open_positions:
                     self._open_positions.remove(position)
+                if symbol in self._live_position_meta:
+                    del self._live_position_meta[symbol]
 
                 self._log.info(f"Paper position closed: {symbol} PnL=${pnl:.2f}")
-                return {"success": True, "pnl": pnl, "price": current_price}
+                return {"success": True, "pnl": round(pnl, 2),
+                        "price": current_price, "error": None}
 
             else:
-                # Live mode: execute close order on exchange
+                # Live mode: send a reduceOnly market order so the position is
+                # CLOSED (not flipped into an opposing one). Pass the unified
+                # symbol straight through — the client converts it internally.
                 self._enforce_rate_limit()
+
                 result = self._client.create_order(
-                    symbol=symbol.replace("/", ""),
-                    type="market",
-                    side=close_side,
-                    amount=amount,
+                    symbol,
+                    "market",
+                    close_side,
+                    amount,
+                    None,                       # price (None for market orders)
+                    params={"reduceOnly": True},
                 )
 
                 if result.get("success"):
-                    close_price = float(result.get("price", entry_price))
+                    # Prefer the actual fill price (average), else fall back.
+                    close_price = result.get("average")
+                    if close_price in (None, 0, 0.0):
+                        close_price = self._current_price(symbol, entry_price)
+                    close_price = float(close_price)
+
                     if close_side == "sell":
                         pnl = (close_price - entry_price) * amount
                     else:
                         pnl = (entry_price - close_price) * amount
 
-                    # Record trade
+                    # Journal the trade and clear local SL/TP metadata so the
+                    # closed position is no longer tracked.
                     self._record_trade(position, close_price, pnl, reason)
-
-                    # Clean up metadata
                     if symbol in self._live_position_meta:
                         del self._live_position_meta[symbol]
+                    self._open_positions = [
+                        p for p in self._open_positions
+                        if p.get("symbol") != symbol
+                    ]
 
                     self._log.info(f"Live position closed: {symbol} PnL=${pnl:.2f}")
-                    return {
-                        "success": True,
-                        "pnl": pnl,
-                        "price": close_price,
-                        "order_id": result.get("order_id"),
-                    }
+                    return {"success": True, "pnl": round(pnl, 2),
+                            "price": close_price, "error": None}
                 else:
+                    # Failure: do NOT record a trade and do NOT delete meta.
                     error = result.get("error", "Unknown error")
                     self._log.error(f"Failed to close position: {error}")
-                    return {"success": False, "error": error}
+                    return {"success": False, "pnl": 0.0, "price": 0.0,
+                            "error": error}
 
         except Exception as exc:
             self._log.error(f"Close position failed: {exc}", exc_info=True)
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "pnl": 0.0, "price": 0.0,
+                    "error": str(exc)}
+
+    def _current_price(self, symbol: str, fallback: float) -> float:
+        """Best-effort current market price for a symbol.
+
+        Uses the exchange client ticker when available; otherwise returns the
+        provided fallback (typically the entry price).
+        """
+        if self._client is not None:
+            try:
+                ticker = self._client.fetch_ticker(symbol)
+                last = ticker.get("last") or ticker.get("close")
+                if last:
+                    return float(last)
+                bid = ticker.get("bid")
+                ask = ticker.get("ask")
+                if bid and ask:
+                    return (float(bid) + float(ask)) / 2.0
+            except Exception as exc:
+                self._log.warning("Could not fetch current price for %s: %s", symbol, exc)
+        return float(fallback)
 
     # ── rate limiting ────────────────────────────────────────────────────
 

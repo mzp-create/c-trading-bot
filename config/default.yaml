@@ -14,22 +14,38 @@ trading:
       allocation_pct: 20.0  # 20% of capital
       enabled: true
   initial_capital: 526.8  # USDT total across all pairs
-  daily_target: 10.0     # $10/day profit target (realistic with $526 capital)
+  daily_target: 15.0      # ~2.8%/day profit target (was 25 — unrealistic on $526)
+  # Fraction of capital RISKED per trade (loss if stop-loss is hit), see
+  # risk/manager.calculate_position_size. 2% is the conservative standard;
+  # 5% on a tiny account is how this bot lost most of its capital.
   max_risk_per_trade: 0.02  # 2% max risk per trade
   max_open_positions: 6  # 2 per pair max
   position_size_mode: "dynamic"  # fixed, dynamic, kelly
+  min_position_value_usd: 50.0  # Minimum $50 per trade (no micro-positions)
 
 exchange:
-  name: "bitfinex"
+  name: "bitfinex"        # CCXT bitfinex with automatic nonce handling
   testnet: false  # Set to false for live trading
   rate_limit: 1.0  # seconds between API calls
   ws_reconnect_delay: 5
   default_type: "margin"  # Use margin wallet where your UST/USDT funds are
+  # Nonce handling: CCXT manages nonces internally (no more "nonce: small" errors)
   api_key: "${BITFINEX_API_KEY}"  # Set via env var
   api_secret: "${BITFINEX_API_SECRET}"  # Set via env var
 
 strategies:
-  enabled: ["trend_following", "grid"]
+  enabled: ["ensemble", "trend_following", "grid"]
+  
+  # Ensemble strategy (ML + RL)
+  ensemble:
+    enabled: true
+    ml_weight: 0.4
+    rl_weight: 0.6
+    confidence_threshold: 0.15  # Lower for new models
+    agreement_required: false
+    use_dynamic_sizing: true
+    max_position_pct: 0.95
+  
   trend_following:
     enabled: true
     weight: 0.4
@@ -106,10 +122,17 @@ sentiment:
   filter_strength: "normal"      # "aggressive" | "normal" | "light"
 
 risk:
-  max_daily_loss: 20.0    # Stop trading after $20 daily loss (with $100 capital)
-  max_drawdown_pct: 15.0   # Max drawdown before stopping
-  stop_loss_pct: 2.0       # Per position stop loss
-  take_profit_pct: 4.0     # Per position take profit
+  # Leverage = MAX margin multiplier; it raises the position-size CEILING
+  # (cap = capital * leverage * max_single_pct) and is the divisor for the
+  # margin/liquidation guard. Modest 2x keeps liquidation distance comfortable.
+  leverage: 2.0              # 2x margin leverage (was 5x — too aggressive on $526)
+  # Daily-loss circuit breaker, proportional to capital (~3% of $526.80 ≈ $16).
+  # Must be < max_drawdown_pct in dollar terms so the daily breaker trips first.
+  max_daily_loss: 16.0       # Stop trading after ~$16 (~3%) daily loss
+  max_drawdown_pct: 10.0     # Max drawdown before stopping (~$53 on $526)
+  max_single_pct: 0.20       # Base cap fraction; effective cap = *leverage
+  stop_loss_pct: 2.0         # Per position stop loss
+  take_profit_pct: 4.0       # Per position take profit
   trailing_stop: true
   trailing_stop_activation: 2.0  # Activate after 2% profit
   trailing_stop_distance: 0.5    # Trailing stop at 0.5% below peak

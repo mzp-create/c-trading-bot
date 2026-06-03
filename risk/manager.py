@@ -103,73 +103,129 @@ class RiskManager:
         signal_type: str,
         regime_position_mult: float = 1.0,
     ) -> float:
-        """Dynamic position sizing using Kelly-based logic.
+        """Risk-based position sizing with an explicit, leverage-aware cap.
 
-        Formula:
-          1. Base = capital * max_risk_per_trade (default 2%)
-          2. Scale by confidence multiplier (0.5x – 1.5x)
-          3. Scale down by volatility
-          4. Apply regime position size multiplier
-          5. Scale down by daily PnL (if losing)
-          6. Clamp to max 20% of capital per trade
+        SIZING MODEL (single, consistent model — read this before changing it)
+        ----------------------------------------------------------------------
+        We use **fixed-fractional risk sizing**, NOT "fraction of capital as
+        notional". The two ideas are different and were previously conflated,
+        which made ``leverage`` a misleading no-op:
+
+          * ``max_risk_per_trade`` is the fraction of *capital* we are willing
+            to LOSE on this trade if the stop-loss is hit. It is the loss
+            budget, not the position size.
+          * ``stop_loss_pct`` is how far (in %) price must move against us to
+            hit the stop. Combined, these fix the position notional:
+
+                risk_amount = capital * max_risk_per_trade        # $ we can lose
+                notional    = risk_amount / (stop_loss_pct / 100) # $ exposure
+
+            Example: capital=$263, risk=2%, stop=2%  →  risk_amount=$5.27,
+            notional = 5.27 / 0.02 = $263. Hitting the 2% stop loses ~$5.27,
+            i.e. exactly the 2% risk budget. This is the whole point.
+
+          * ``leverage`` is the MAX margin multiplier. It does NOT inflate the
+            risk-based notional above; instead it raises the hard ceiling so
+            that leverage genuinely changes how large a position is *allowed*
+            to be (the old code clamped to a hardcoded 20% that ignored
+            leverage, so 5x and 10x produced identical sizes):
+
+                max_notional = capital * leverage * max_single_pct
+
+            With max_single_pct=0.20 and leverage=5 the cap is 100% of capital;
+            leverage=10 → 200%. Changing leverage now visibly changes the cap
+            (and therefore the returned size whenever the risk-based notional
+            would otherwise exceed it).
+
+        SAFETY GUARDS
+        -------------
+          * Confidence (0.5x–1.5x) and regime multipliers scale the notional.
+          * The notional is clamped to ``max_notional`` (leverage-aware cap).
+          * MARGIN/LIQUIDATION GUARD: a leveraged position only locks up
+            ``notional / leverage`` as margin. If that required margin exceeds
+            the available capital we skip the trade (return 0) — this is the
+            check that was missing and that exposes the account to liquidation.
 
         Parameters
         ----------
         capital : float
-            Available capital.
+            Available capital allocated to this pair/instance (quote currency).
         price : float
             Current asset price.
         confidence : float
             Signal confidence (0.0 – 1.0).
         signal_type : str
-            'BUY' or 'SELL'.
+            'BUY' or 'SELL' (not used for sizing magnitude; kept for API).
         regime_position_mult : float
-            Regime-adjusted size multiplier (0.5 for volatile, 1.0 for trending, etc.)
+            Regime-adjusted size multiplier (0.5 for volatile, 1.0 for trending).
 
         Returns the **base currency amount** (e.g. BTC) to trade.
         """
         if capital <= 0 or price <= 0:
             return 0.0
 
-        max_risk_pct = float(
-            self.trading_config.get("max_risk_per_trade", 0.02)
-        )
+        # --- Inputs ---------------------------------------------------------
+        max_risk_pct = float(self.trading_config.get("max_risk_per_trade", 0.02))
+        # Leverage = max margin multiplier. Default 1.0 (spot / no leverage).
+        leverage = max(1.0, float(self.risk_config.get("leverage", 1.0)))
+        # Stop-loss distance drives the risk→notional conversion. Guard against
+        # a zero/garbage value that would blow the notional up to infinity.
+        stop_loss_pct = abs(float(self.risk_config.get("stop_loss_pct", 2.0)))
+        if stop_loss_pct <= 0:
+            stop_loss_pct = 2.0
 
-        # 1. Base position value in quote currency
-        base_value = capital * max_risk_pct
+        # --- 1. Risk-based notional ----------------------------------------
+        # Size so that hitting the stop loses ~ (capital * max_risk_per_trade).
+        risk_amount = capital * max_risk_pct
+        notional = risk_amount / (stop_loss_pct / 100.0)
 
-        # 2. Confidence multiplier (0.5 – 1.5)
+        # --- 2. Confidence multiplier (0.5x at conf=0 → 1.5x at conf=1) -----
         confidence = max(0.0, min(1.0, confidence))
-        conf_mult = 0.5 + confidence  # ranges 0.5 at conf=0 to 1.5 at conf=1
-        base_value *= conf_mult
+        conf_mult = 0.5 + confidence
+        notional *= conf_mult
 
-        # 3. Volatility adjustment (scale down if vol is high)
-        # We use a simplified vol measure: higher vol = smaller position.
-        # The caller can pass vol info via signal_type or we use a default.
-        # Default vol_mult = 1.0 (no adjustment).
-        vol_mult = 1.0
-        # (actual vol adjustment applied if caller passes ATR data via a future extension)
-
-        # 4. Regime position size multiplier
+        # --- 3. Regime position size multiplier (volatile shrinks size) ----
         regime_mult = max(0.1, min(2.0, float(regime_position_mult)))
-        base_value *= regime_mult
+        notional *= regime_mult
 
-        # 5. Daily PnL adjustment (losing day = smaller positions)
-        # The caller tracks daily_pnl externally; we clamp by scaling.
-        # The check_trade_allowed already gates trading. Here we just
-        # note that capital already reflects daily_pnl.
+        # --- 4. Leverage-aware hard cap ------------------------------------
+        # The cap is a function of leverage, so leverage is NOT silently
+        # nullified: raising leverage raises the maximum allowed notional.
+        max_single_pct = float(self.risk_config.get("max_single_pct", 0.20))
+        max_notional = capital * leverage * max_single_pct
+        notional = min(notional, max_notional)
 
-        # 5. Clamp to max 20% of capital
-        max_single_pct = 0.20
-        max_single_value = capital * max_single_pct
-        position_value = min(base_value * vol_mult, max_single_value)
+        # --- 5. Margin / liquidation guard ---------------------------------
+        # A leveraged position requires margin = notional / leverage. If the
+        # position we computed would need more margin than we actually have,
+        # the position is unsafe (over-leveraged → liquidation risk) — skip it.
+        required_margin = notional / leverage
+        if required_margin > capital:
+            self._log.warning(
+                "Required margin $%.2f exceeds available capital $%.2f "
+                "(notional $%.2f, leverage %.1fx) - skipping trade",
+                required_margin, capital, notional, leverage,
+            )
+            return 0.0
 
-        # Convert to base currency amount
-        amount = position_value / price
+        # --- 6. Convert to base-currency amount ----------------------------
+        amount = notional / price
 
         # Minimum amount check (avoid dust trades)
         min_amount = 0.00001  # ~$0.10 at $10k BTC
         if amount < min_amount:
+            return 0.0
+
+        # Minimum position value check (no micro-positions)
+        min_position_value_usd = float(
+            self.trading_config.get("min_position_value_usd", 50.0)
+        )
+        actual_value = amount * price
+        if actual_value < min_position_value_usd:
+            self._log.warning(
+                "Position size $%.2f below minimum $%.2f - skipping trade",
+                actual_value, min_position_value_usd
+            )
             return 0.0
 
         return round(amount, 8)

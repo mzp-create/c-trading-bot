@@ -26,13 +26,28 @@ class TelegramNotifier:
         self.enabled = bool(self.bot_token and self.chat_id)
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}" if self.enabled else ""
 
+        # Instance identification for dual-bot setup
+        self.instance = config.get('trading', {}).get('instance', 'default')
+        self.trade_direction = config.get('trading', {}).get('trade_direction', 'both')
+        self.instance_prefix = config.get('monitoring', {}).get('instance_prefix', '')
+        
+        # Build header prefix for messages
+        if self.instance_prefix:
+            self.msg_prefix = f"{self.instance_prefix} "
+        elif self.instance == 'long':
+            self.msg_prefix = "🟢 **LONG** | "
+        elif self.instance == 'short':
+            self.msg_prefix = "🔴 **SHORT** | "
+        else:
+            self.msg_prefix = ""
+
         self._last_update_id = 0
         self._current_chat_id = None
         self._last_command_time = 0.0
         self._last_command_text = ""
 
         if self.enabled:
-            self.log.info("Telegram notifications enabled")
+            self.log.info(f"Telegram notifications enabled (instance={self.instance})")
         else:
             self.log.info("Telegram not configured — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars")
 
@@ -43,11 +58,14 @@ class TelegramNotifier:
             return False
 
         try:
+            # Add instance prefix to message
+            prefixed_message = self.msg_prefix + message if self.msg_prefix else message
+            
             resp = requests.post(
                 f"{self.base_url}/sendMessage",
                 json={
                     'chat_id': self.chat_id,
-                    'text': message,
+                    'text': prefixed_message,
                     'parse_mode': 'Markdown',
                     'disable_web_page_preview': True,
                 },
@@ -104,14 +122,27 @@ class TelegramNotifier:
         """Send error alert."""
         return self.send(f"🚨 **Error**\n```{error_msg[:500]}```")
 
-    def send_startup(self, mode: str, capital: float, symbol: str):
+    def send_startup(self, mode: str, capital: float, symbols: list):
         """Send startup notification."""
+        # Instance-specific header
+        if self.instance == 'long':
+            header = "🟢 **LONG Bot Started**"
+            direction_note = "\n📍 Only BUY signals (long positions)"
+        elif self.instance == 'short':
+            header = "🔴 **SHORT Bot Started**"
+            direction_note = "\n📍 Only SELL signals (short positions)"
+        else:
+            header = "🤖 **Bot Started**"
+            direction_note = ""
+        
+        symbols_str = ', '.join(symbols) if isinstance(symbols, list) else symbols
+        
         msg = (
-            f"🤖 **Bot Started**\n"
+            f"{header}{direction_note}\n"
             f"Mode: {mode.upper()}\n"
             f"Capital: ${capital:.2f}\n"
-            f"Target: $100/day\n"
-            f"Symbol: {symbol}\n"
+            f"Daily Target: $25.00\n"
+            f"Symbols: {symbols_str}\n"
             f"Time: {self._now_str()}"
         )
         return self.send(msg)
@@ -121,7 +152,16 @@ class TelegramNotifier:
                            market_data: dict = None, regime: str = "",
                            daily_target: float = 10.0):
         """Send an enhanced cycle summary with market overview and signal details."""
-        lines = ["📊 **Market Overview**"]
+        
+        # Instance-specific header
+        if self.instance == 'long':
+            header = "🟢 **LONG Bot | Market Overview**"
+        elif self.instance == 'short':
+            header = "🔴 **SHORT Bot | Market Overview**"
+        else:
+            header = "📊 **Market Overview**"
+        
+        lines = [header]
 
         # Market regime indicator
         regime_emoji = {"TRENDING": "📈", "RANGING": "📊", "VOLATILE": "🌪️"}.get(regime, "⚪")

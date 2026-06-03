@@ -5,6 +5,7 @@ Manages and combines multiple trading strategies:
   - TrendFollowingStrategy  (1h timeframe, EMA crossovers)
   - ScalpingStrategy        (5m timeframe, MACD/BB/ATR)
   - GridStrategy            (15m timeframe, mean reversion)
+  - EnsembleStrategy        (ML + RL ensemble)
 
 Each strategy implements a `generate()` method that returns a signal dict.
 """
@@ -12,6 +13,13 @@ Each strategy implements a `generate()` method that returns a signal dict.
 import math
 import logging
 from typing import Dict, List, Any, Optional, Tuple
+
+# Import ensemble strategy
+try:
+    from strategies.ensemble_bot_integration import EnsembleBotStrategy as EnsembleStrategy
+    ENSEMBLE_AVAILABLE = True
+except ImportError:
+    ENSEMBLE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +29,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class StrategySelector:
-    """Manages enabled strategies and produces combined signal list."""
+    """Manages enabled strategies and produces combined signal list.
+    
+    Supports direction filtering for dual-instance trading:
+    - "long": Only allow BUY signals (SELL becomes HOLD)
+    - "short": Only allow SELL signals (BUY becomes HOLD)  
+    - "both": Allow all signals (default, backward compatible)
+    """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, trade_direction: str = "both"):
         self.config = config
         self.strategies_config = config.get("strategies", {})
+        self.trade_direction = trade_direction.lower()
         self._log = logging.getLogger(f"{__name__}.StrategySelector")
-        self._log.info("StrategySelector initialised")
+        self._log.info(f"StrategySelector initialised (direction={trade_direction})")
+
+        # Validate direction
+        if self.trade_direction not in ("long", "short", "both"):
+            self._log.warning(f"Invalid trade_direction '{trade_direction}', defaulting to 'both'")
+            self.trade_direction = "both"
 
         # Instantiate all supported strategies
         self._strategies: Dict[str, object] = {
@@ -35,6 +55,18 @@ class StrategySelector:
             "scalping": ScalpingStrategy(self.strategies_config),
             "grid": GridStrategy(self.strategies_config),
         }
+        
+        # Add ensemble strategy if available
+        if ENSEMBLE_AVAILABLE:
+            try:
+                symbol = config.get("trading", {}).get("symbols", [{}])[0].get("name", "BTC/USDT")
+                self._strategies["ensemble"] = EnsembleStrategy(
+                    symbol=symbol,
+                    config=self.strategies_config.get("ensemble", {})
+                )
+                self._log.info("✅ Ensemble strategy loaded")
+            except Exception as e:
+                self._log.warning(f"⚠️ Failed to load ensemble strategy: {e}")
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -60,7 +92,10 @@ class StrategySelector:
         ta_15m: dict,
         ml_signal: dict,
     ) -> List[Dict[str, Any]]:
-        """Return list of signal dicts from each enabled strategy."""
+        """Return list of signal dicts from each enabled strategy.
+        
+        Signals are filtered by trade_direction if set.
+        """
         signals = []
         for entry in self.get_enabled_strategies():
             name = entry["name"]
@@ -72,6 +107,8 @@ class StrategySelector:
                 signal = strategy.generate(ta_1h, ta_5m, ta_15m, ml_signal)
                 signal["name"] = name
                 signal["weight"] = entry["weight"]
+                # Apply direction filtering
+                signal = self._filter_by_direction(signal)
                 signals.append(signal)
             except Exception as exc:
                 self._log.error("Strategy '%s' failed: %s", name, exc)
@@ -84,6 +121,46 @@ class StrategySelector:
                     "params": entry["params"],
                 })
         return signals
+
+    def _filter_by_direction(self, signal: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter signal based on instance trade direction.
+        
+        - "long": Only allow BUY signals, SELL becomes HOLD
+        - "short": Only allow SELL signals, BUY becomes HOLD
+        - "both": Allow all signals (no filtering)
+        
+        Returns modified signal with [BLOCKED:direction] tag in reason.
+        """
+        if self.trade_direction == "both":
+            return signal
+        
+        sig_type = signal.get("signal", "HOLD")
+        if isinstance(sig_type, str):
+            sig_type = sig_type.upper()
+        else:
+            sig_type = "HOLD"
+        
+        # Long instance: block SELL signals
+        if self.trade_direction == "long" and sig_type == "SELL":
+            return {
+                **signal,
+                "signal": "HOLD",
+                "reason": signal.get("reason", "") + " | [BLOCKED:long_only]"
+            }
+        
+        # Short instance: block BUY signals
+        if self.trade_direction == "short" and sig_type == "BUY":
+            return {
+                **signal,
+                "signal": "HOLD",
+                "reason": signal.get("reason", "") + " | [BLOCKED:short_only]"
+            }
+        
+        # Ensure signal key exists
+        if "signal" not in signal:
+            signal = {**signal, "signal": sig_type}
+        
+        return signal
 
 
 # ---------------------------------------------------------------------------

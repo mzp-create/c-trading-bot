@@ -1,0 +1,175 @@
+# Crypto Trading Bot — SHORT-ONLY Instance Configuration
+# This bot only executes SELL signals (short positions)
+# Run with: python3 main.py --mode live --instance short --config config/short.yaml
+
+trading:
+  instance: "short"
+  trade_direction: "short"  # Only SELL signals allowed
+  
+  symbols:
+    - name: "BTC/USDT"
+      symbol: "tBTCUST"
+      allocation_pct: 50.0  # 50% of this instance's capital
+      enabled: true
+    - name: "ETH/USDT"
+      symbol: "tETHUST"
+      allocation_pct: 30.0
+      enabled: true
+    - name: "SOL/USDT"
+      symbol: "tSOLUST"
+      allocation_pct: 20.0
+      enabled: true
+  
+  initial_capital: 263.4  # 50% of $526.80 total
+  daily_target: 7.5        # ~2.8%/day target (was 12.5 / 4.7% — unrealistic)
+  # Fraction of capital RISKED per trade (loss if stop hit). See default.yaml.
+  max_risk_per_trade: 0.02  # 2% max risk per trade
+  max_open_positions: 3   # 1 per pair max
+  position_size_mode: "dynamic"
+  min_position_value_usd: 50.0  # Minimum $50 per trade (no micro-positions)
+
+exchange:
+  name: "bitfinex"        # CCXT bitfinex with automatic nonce handling
+  testnet: false
+  rate_limit: 1.0
+  ws_reconnect_delay: 5
+  default_type: "margin"  # Use margin wallet (required for shorts)
+  # NONCE / API-KEY ISOLATION  (read before running dual instances)
+  # CCXT manages nonces internally, BUT Bitfinex requires each request's nonce
+  # to be strictly increasing PER API KEY. When the long + short processes share
+  # ONE key they race each other and the exchange rejects the lower request with
+  # "nonce: small". Each instance MUST therefore use its OWN distinct API key.
+  #
+  # PREFERRED (running long + short at the same time): create a SECOND API key in
+  # the Bitfinex UI, then export per-instance vars and swap the two lines below:
+  #     export BITFINEX_SHORT_API_KEY=...  BITFINEX_SHORT_API_SECRET=...
+  #     api_key:    "${BITFINEX_SHORT_API_KEY}"
+  #     api_secret: "${BITFINEX_SHORT_API_SECRET}"
+  #
+  # FALLBACK (single instance only): the shared key below is safe ONLY if this is
+  # the sole process hitting Bitfinex. Do NOT run long+short on the shared key.
+  # (Config loader resolves plain ${VAR}; it does not support ${VAR:-default}.)
+  api_key: "${BITFINEX_API_KEY}"
+  api_secret: "${BITFINEX_API_SECRET}"
+
+strategies:
+  enabled: ["ensemble", "trend_following"]
+  
+  # Ensemble strategy (ML + RL) - SHORT only
+  ensemble:
+    enabled: true
+    ml_weight: 0.4
+    rl_weight: 0.6
+    confidence_threshold: 0.15
+    agreement_required: false
+    use_dynamic_sizing: true
+    max_position_pct: 0.95
+    # Only take SELL signals
+    short_only: true
+  
+  trend_following:
+    enabled: true
+    weight: 0.4
+    timeframe: "1h"
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+  scalping:
+    enabled: false
+    weight: 0.35
+    timeframe: "5m"
+  grid:
+    enabled: true
+    weight: 0.25
+    timeframe: "15m"
+    grid_levels: 10
+    grid_spread_pct: 0.5
+
+ml:
+  enabled: true
+  model_type: "xgboost"
+  features:
+    - "rsi"
+    - "macd"
+    - "bb_upper"
+    - "bb_lower"
+    - "ema_9"
+    - "ema_21"
+    - "volume_sma"
+    - "price_change_1h"
+    - "price_change_4h"
+    - "volatility"
+  lookback: 48
+  retrain_interval: 24
+  min_train_samples: 100
+
+regime_detector:
+  enabled: true
+  adx_trending_threshold: 25
+  adx_ranging_threshold: 20
+  volatility_ratio_threshold: 1.5
+  lookback: 50
+  trend_lookback: 14
+  max_correlation: 0.7
+  regime_params:
+    TRENDING:
+      stop_loss_mult: 1.2
+      take_profit_mult: 1.5
+      position_size_mult: 1.0
+    RANGING:
+      stop_loss_mult: 0.8
+      take_profit_mult: 0.7
+      position_size_mult: 0.8
+    VOLATILE:
+      stop_loss_mult: 1.5
+      take_profit_mult: 1.0
+      position_size_mult: 0.5
+
+sentiment:
+  enabled: false
+  cache_ttl: 300
+  source_weights:
+    rss: 1.0
+    newsapi: 0.5
+    reddit: 0.5
+  llm_model: ""
+  filter_strength: "normal"
+
+risk:
+  # Leverage = MAX margin multiplier (cap = capital*leverage*max_single_pct)
+  # and the margin/liquidation-guard divisor. Modest 2x. See default.yaml.
+  leverage: 2.0           # 2x margin leverage (was 5x)
+  # Daily-loss circuit breaker ~3% of this instance's $263.40 (~$8).
+  # Trips before max_drawdown_pct (~$26) so the daily breaker fires first.
+  max_daily_loss: 8.0     # ~$8 (~3%) daily loss limit for this instance
+  max_drawdown_pct: 10.0  # ~$26 on $263.40
+  max_single_pct: 0.20    # Base cap fraction; effective cap = *leverage
+  stop_loss_pct: 2.0
+  take_profit_pct: 4.0
+  trailing_stop: true
+  trailing_stop_activation: 2.0
+  trailing_stop_distance: 0.5
+  cooldown_after_loss: 300
+
+monitoring:
+  log_level: "INFO"
+  save_trades: true
+  save_equity_curve: true
+  telegram_alerts: true
+  telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
+  telegram_chat_id: "${TELEGRAM_CHAT_ID}"
+  alert_on_trade: true
+  alert_on_drawdown: true
+  daily_summary: true
+  # Instance prefix for Telegram messages
+  instance_prefix: "🔴 SHORT"
+
+data:
+  # Instance-specific data directories
+  ohlcv_dir: "instances/short/data/ohlcv/"
+  models_dir: "instances/short/data/models/"
+  trades_file: "instances/short/data/trades.csv"
+  equity_file: "instances/short/data/equity.csv"
+  log_file: "instances/short/logs/bot.log"
