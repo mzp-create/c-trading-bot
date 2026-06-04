@@ -221,18 +221,28 @@ class WsFeed:
         loop, thread, bfx = self._loop, self._thread, self._bfx
         if loop is None or thread is None:
             return
-        async def _close():
+        # The loop may already be closed (process teardown / atexit after the
+        # daemon thread ended). Guard every loop interaction so stop() never
+        # raises "Event loop is closed" on shutdown.
+        if not loop.is_closed():
+            async def _close():
+                try:
+                    await bfx.wss.close()
+                except Exception:
+                    pass
             try:
-                await bfx.wss.close()
+                fut = asyncio.run_coroutine_threadsafe(_close(), loop)
+                fut.result(timeout=5)
             except Exception:
                 pass
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                pass
         try:
-            fut = asyncio.run_coroutine_threadsafe(_close(), loop)
-            fut.result(timeout=5)
-        except Exception:
+            thread.join(timeout=5)
+        except RuntimeError:
             pass
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=5)
         self._thread = None
         self._mark_down()
 
