@@ -1509,7 +1509,7 @@ git commit -m "refactor(collector): use typed BitfinexClient (ohlcv/ticker)"
         total = {w.currency: w.balance for w in wallets}
         free = {w.currency: w.available for w in wallets}
 ```
-Then the per-currency reads (`total.get("USDT", 0)`, etc.) work unchanged. Note Bitfinex currency is `UST` not `USDT` for the margin wallet — map it: after building `total`, add `total.setdefault("USDT", total.get("UST", 0))` so existing `USDT` lookups resolve.
+Then the per-currency reads (`total.get("USDT", 0)`, etc.) work unchanged. (Currency is already normalized to display form — `BfxRest.get_wallets` maps Bitfinex `UST`→`USDT` — so no extra mapping is needed here.)
 
 - [ ] **Step 2: `close_positions.py`** — replace dict reads with typed:
 ```python

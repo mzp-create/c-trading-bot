@@ -773,6 +773,8 @@ In `execution/engine.py`:
 - Delete `_enforce_rate_limit` and `self._last_api_call`/`self._rate_limit`; remove all `self._enforce_rate_limit()` calls (the client owns throttling).
 - Delete `get_open_positions()` (unused wrapper — grep to confirm no caller; main uses `open_positions` property).
 - Delete `_normalize_symbol`; replace its sole remaining caller (if any) with `from bitfinex import symbols as bfx_symbols; bfx_symbols.to_display(x)`.
+- Remove orphaned imports left by the Task-3 paper-sim deletion (grep to confirm unused): `import math`, `defaultdict` (from `collections import deque, defaultdict` → keep `deque`), and `from decimal import Decimal, ROUND_DOWN, ROUND_UP`.
+- Remove the now-unreachable `if self._client is None:` guard in the unified `_live_execute_order` (the client is always built) and any other always-true `if self._client:` sentinels. Optionally rename `_live_execute_order` → `_execute_order_via_client` and fix the stale "for live positions" comment (cosmetic; only if cheap).
 
 - [ ] **Step 2: Simplify `_current_price`**
 

@@ -726,19 +726,14 @@ def test_submit_timeout_raises_ack_unparseable():
     feed._send_submit = lambda *a: None        # no reply ever
     with pytest.raises(AckUnparseable):
         feed.submit_order_sync("BTC/USDT", "buy", 1.0, price=100.0)
-
-
-def test_reconnect_reauth_triggers_reconcile():
-    calls = {"pos": 0, "wal": 0}
-    rest = types.SimpleNamespace(
-        get_positions=lambda: (calls.__setitem__("pos", calls["pos"] + 1) or []),
-        get_wallets=lambda: (calls.__setitem__("wal", calls["wal"] + 1) or []))
-    feed = WsFeed("k", "s", ["BTC/USDT"], MarketState(), AccountState(), rest)
-    feed._on_authenticated({})      # first auth: no reconcile (snapshot will come)
-    assert calls["pos"] == 0
-    feed._on_authenticated({})      # re-auth: reconcile
-    assert calls["pos"] == 1 and calls["wal"] == 1
 ```
+
+> The reconnect-reconcile is NOT triggered by a re-auth event — bfxapi's
+> `_ONCE_PER_CONNECTION` gate suppresses `authenticated` after the first
+> connection (verified in the installed source), so reconnect recovery is the
+> unconditional periodic `_reconcile()` loop, already covered by
+> `tests/test_ws_feed.py::test_reconcile_pulls_positions_and_wallets_from_rest`
+> (added in Task 3's fix). No re-auth test here.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1031,7 +1026,7 @@ In `bitfinex/client.py`:
             api_key, api_secret, names, market, account, self._auth,
             ticker_staleness=float(ws_cfg.get("ticker_staleness_seconds", 15)),
             order_confirm_timeout=float(ws_cfg.get("order_confirm_timeout_seconds", 10)),
-            reconcile_interval=float(ws_cfg.get("reconcile_interval_seconds", 300)),
+            reconcile_interval=float(ws_cfg.get("reconcile_interval_seconds", 90)),
             wss_host=ws_cfg.get("wss_host"))
         self._enable_ws(market=market, account=account, feed=feed,
                         rest=self._auth,
@@ -1100,12 +1095,10 @@ In `bitfinex/client.py`:
         if self._feed is not None:
             self._feed.stop()
 ```
-Leave `cancel_order` delegating to `self._auth.cancel_order` (REST) for now — WS cancel exists (`feed.cancel_order_sync`) but the engine's cancel path is rare; route it WS-first too for consistency:
+`cancel_order` stays on REST (it is infrequent → negligible nonce impact, and the WS `oc-req-notification` echoes the order's *original* submit cid, not a cancel cid, so WS correlation isn't reliable — REST is synchronous and returns a parsed `Order`):
 ```python
     def cancel_order(self, order_id: int) -> Order:
-        if self._ws_healthy():
-            return self._feed.cancel_order_sync(order_id)
-        return self._auth.cancel_order(order_id)
+        return self._auth.cancel_order(order_id)   # REST: rare path, reliable
 ```
 `fetch_my_trades` stays REST-backed (full history isn't in state); leave as-is.
 

@@ -188,18 +188,28 @@ absent/false. The engine and consumers call identical methods in both modes.
 
 ## 7. Reconnect & reconciliation
 
-- **The gotcha:** bfxapi auto-reconnects (exponential backoff), and channel
-  subscriptions + auth are re-established automatically, **but snapshots
-  (`position_snapshot`/`wallet_snapshot`) fire only once per emitter instance** —
-  not after a reconnect. So post-reconnect, incremental updates resume without a
-  fresh baseline.
-- **Fix:** on every `authenticated` event after the first, the feed schedules a
-  **REST reconcile**: `BfxRest.get_positions()` + `get_wallets()` overwrite
-  `AccountState` (snapshot semantics), then sets `last_reconcile`. This restores
-  a correct baseline before incremental updates continue.
-- **Backstop:** a periodic REST reconcile every `reconcile_interval_seconds`
-  (default 300) overwrites positions/wallets regardless — cheap insurance against
-  a missed event or book checksum gap (~1 REST call / 5 min vs ~7/cycle).
+- **The gotcha (verified in the installed bfxapi v4 source):** the WS event
+  emitter gates `open`, `authenticated`, `position_snapshot`, `wallet_snapshot`
+  (and the other snapshots) in a `_ONCE_PER_CONNECTION` set, and the emitter's
+  seen-events list is **reused across reconnects and never reset**. bfxapi
+  auto-reconnects and re-subscribes/re-auths transparently, but it does **not**
+  re-emit `open`/`authenticated`/snapshots on a reconnect — and it emits
+  `disconnected` **only on a terminal give-up**, not on transient drops. So there
+  is **no reliable event signal of a reconnect**, and an event-driven reconnect
+  trigger cannot work.
+- **Recovery mechanism — an unconditional periodic REST reconcile.** The feed
+  runs a background task every `reconcile_interval_seconds` (default **90**) that
+  overwrites `AccountState` positions+wallets from `BfxRest.get_positions()` +
+  `get_wallets()` (snapshot semantics) and sets `last_reconcile`. This is the
+  primary correctness guarantee: it bounds account-state staleness to the
+  interval regardless of any reconnect, missed event, or checksum gap. Between
+  reconciles, incremental push updates keep state current for changes that occur
+  while connected. Cost is ~2 REST calls / 90 s vs the old ~7 reads / 60 s cycle
+  — still a large reduction, and the high-frequency ticker reads are fully
+  push-based.
+- **Terminal disconnect:** when bfxapi gives up (emits `disconnected`), the feed
+  marks `connected=authenticated=False` → `is_healthy()` is False → reads and
+  orders fall back to REST until the feed recovers/restarts.
 - **Startup window:** before the first snapshot/auth, reads fall back to REST, so
   the bot is never blind while connecting.
 
@@ -238,7 +248,7 @@ exchange:
     wss_host: "wss://api.bitfinex.com/ws/2"
     ticker_staleness_seconds: 15
     order_confirm_timeout_seconds: 10
-    reconcile_interval_seconds: 300
+    reconcile_interval_seconds: 90      # periodic REST reconcile (reconnect recovery)
 ```
 
 `enabled: false` is a clean kill-switch that reverts to Phase-2 REST-only.
