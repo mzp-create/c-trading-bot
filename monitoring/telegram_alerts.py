@@ -394,6 +394,7 @@ class TelegramNotifier:
           /help       — list all commands
           /sentiment  — latest news sentiment scores
           /retrain    — force ML retrain
+          /dashboard  — one-time login link to the web dashboard
         """
         import time as _time
 
@@ -410,6 +411,7 @@ class TelegramNotifier:
             "/config":   self._cmd_config,
             "/sentiment": self._cmd_sentiment,
             "/retrain":  self._cmd_retrain,
+            "/dashboard": self._cmd_dashboard,
         }
 
         handler = cmd_map.get(cmd)
@@ -757,6 +759,56 @@ class TelegramNotifier:
             f"  Filter Strength: {sent.get('filter_strength', 0.30)}",
         ]
         return "\n".join(lines)
+
+    @staticmethod
+    def _dashboard_password_file() -> "Path":  # noqa: F821
+        """Path to the dashboard's generated password file. Patchable in tests."""
+        from pathlib import Path
+        return Path(__file__).resolve().parent.parent / "dashboard" / ".dashboard_password"
+
+    @staticmethod
+    def _cmd_dashboard(_args: str, bot: "TradingBot") -> str:  # noqa: F821
+        """Return a one-time login link to the web dashboard.
+
+        Reads the dashboard's random password (the HMAC secret), mints a
+        short-lived single-use token, and returns a /login URL. The raw
+        password is NEVER included in the reply.
+        """
+        pw_file = TelegramNotifier._dashboard_password_file()
+        try:
+            raw = pw_file.read_text()
+        except OSError:
+            return (
+                "⚠️ Dashboard not running (no password file found). "
+                "Start the dashboard, then try /dashboard again."
+            )
+
+        secret = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith("DASHBOARD_PASSWORD="):
+                secret = line.split("=", 1)[1].strip()
+                break
+        if not secret:
+            secret = raw.strip()
+        if not secret:
+            return "⚠️ Dashboard not running (empty password file)."
+
+        try:
+            from dashboard.login_token import mint
+        except ImportError:
+            from login_token import mint
+
+        token = mint(secret, ttl=120)
+        base = (
+            (getattr(bot, "config", {}) or {})
+            .get("dashboard", {})
+            .get("public_url", "http://localhost:8999")
+        ).rstrip("/")
+        return (
+            "🔐 **Dashboard login** (valid 2 min, single use):\n"
+            f"{base}/login?token={token}"
+        )
 
     @staticmethod
     def _cmd_sentiment(_args: str, bot: "TradingBot") -> str:  # noqa: F821

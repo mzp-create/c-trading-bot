@@ -156,6 +156,12 @@ monitoring:
   alert_on_drawdown: true
   daily_summary: true
 
+dashboard:
+  # Base URL the /dashboard Telegram command builds login links against.
+  # Set to your public-facing host (e.g. https://dash.example.com) when the
+  # dashboard is reachable remotely; defaults to localhost for local use.
+  public_url: "http://localhost:8999"
+
 data:
   ohlcv_dir: "data/ohlcv/"
   models_dir: "data/models/"
