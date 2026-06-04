@@ -37,6 +37,7 @@ from copy import deepcopy
 from persistence import (
     TradingRepository, OrderRecord, FillRecord, PositionRecord, TradeRecord,
 )
+from bitfinex.errors import OrderRejected, AckUnparseable
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,6 @@ class ExecutionEngine:
         self._client = None
         if mode == "live":
             from bitfinex import BitfinexClient
-            from bitfinex.errors import OrderRejected, AckUnparseable  # noqa: F401
             self._client = BitfinexClient(config, mode="live",
                                           instance=self.instance)
             self._log.info("Live mode: BitfinexClient connected")
@@ -780,7 +780,6 @@ class ExecutionEngine:
 
         self._enforce_rate_limit()
 
-        from bitfinex.errors import OrderRejected, AckUnparseable
         try:
             order = self._client.create_order(
                 symbol, side, amount, order_type=order_type, price=price)
@@ -797,24 +796,13 @@ class ExecutionEngine:
         filled = float(order.filled or 0)
         fee_cost = float(order.fee or 0.0)
 
-        result = {
-            "success": order.is_filled,
-            "id": order.id,
-            "average": fill_price,
-            "filled": filled or amount,
-            "fee": fee_cost,
-            "error": None if order.is_filled else order.status,
-            "order_id": order_id,
-        }
-
-        if not result["success"]:
+        if not order.is_filled:
             return {"success": False,
-                    "error": result["error"] or "Order not filled"}
+                    "error": order.status or "Order not filled"}
 
         # For market orders that show 0 filled, assume full fill
         if order_type == "market" and filled == 0:
             filled = amount
-            result["filled"] = amount
             self._log.info("Market order assumed filled: %s @ %s", amount, fill_price)
 
         # Record position locally for tracking
@@ -952,6 +940,9 @@ class ExecutionEngine:
                 norm = self._normalize_symbol(p.symbol)
                 display_name = symbol_map.get(norm, norm or p.symbol)
                 side = "buy" if p.side == "long" else "sell"
+                # Dual keys (camelCase + snake_case) during migration: external
+                # readers (scripts/reconcile_*, telegram_alerts) still use camelCase.
+                # TODO: drop camelCase aliases once those callers are migrated.
                 positions.append({
                     "symbol": display_name,
                     "side": side,
@@ -1118,7 +1109,6 @@ class ExecutionEngine:
                 # symbol straight through — the client converts it internally.
                 self._enforce_rate_limit()
 
-                from bitfinex.errors import OrderRejected, AckUnparseable
                 try:
                     order = self._client.create_order(
                         symbol, close_side, amount,
