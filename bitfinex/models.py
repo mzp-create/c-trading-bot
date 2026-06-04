@@ -33,6 +33,13 @@ class Order:
         s = (self.status or "").upper()
         return self.id is None or "REJECT" in s or "ERROR" in s
 
+    @property
+    def is_accepted(self) -> bool:
+        """The exchange accepted the order (a real id and not rejected). A
+        market order with a real id WILL fill, so callers treat this as success
+        even if the status is transiently ACTIVE/PARTIALLY FILLED."""
+        return self.id is not None and not self.is_rejected
+
 
 @dataclass(frozen=True)
 class Position:

@@ -796,9 +796,9 @@ class ExecutionEngine:
         filled = float(order.filled or 0)
         fee_cost = float(order.fee or 0.0)
 
-        if not order.is_filled:
+        if not order.is_accepted:
             return {"success": False,
-                    "error": order.status or "Order not filled"}
+                    "error": order.status or "Order not accepted"}
 
         # For market orders that show 0 filled, assume full fill
         if order_type == "market" and filled == 0:
@@ -1118,7 +1118,7 @@ class ExecutionEngine:
                     return {"success": False, "pnl": 0.0, "price": 0.0,
                             "error": str(exc)}
 
-                if order.is_filled:
+                if order.is_accepted:
                     # Prefer the actual fill price (average), else fall back.
                     close_price = order.avg_price
                     if close_price in (None, 0, 0.0):

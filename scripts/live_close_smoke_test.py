@@ -188,11 +188,14 @@ def main():
         banner("RESULT")
         print(f"  position flat after close : {flat} (contracts={contracts})")
         try:
-            with open(engine._trades_csv) as f:
-                last = f.read().strip().splitlines()[-1]
-            print(f"  trades.csv last row       : {last}")
+            recent = engine._repo.recent_trades(limit=1)
+            if recent:
+                t = recent[0]
+                print(f"  journaled: {t.symbol} {t.side} pnl={t.pnl} @ {t.ts}")
+            else:
+                print("  (no journaled trade found)")
         except Exception as exc:  # noqa: BLE001
-            print(f"  ! could not read trades.csv: {exc!r}")
+            print(f"  (journal check skipped: {exc})")
 
         verdict = "PASS" if (ok and flat) else "FAIL"
         print(f"\n  SMOKE TEST: {verdict}")
