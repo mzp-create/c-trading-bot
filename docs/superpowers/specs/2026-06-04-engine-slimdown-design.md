@@ -1,7 +1,7 @@
 # Design: Trading Architecture Refactor — Phase 4, Engine Slim-Down
 
 Date: 2026-06-04
-Status: Approved (design) — pending written-spec review
+Status: Implemented (Phase 4) — see docs/superpowers/plans/2026-06-04-engine-slimdown.md (pending live gates)
 Branch: refactor/trading-architecture
 Predecessors: Phase 1 persistence (implemented), Phase 2 bitfinex package (implemented, live gate deferred), Phase 3 WebSocket feed (implemented, live gate deferred)
 
