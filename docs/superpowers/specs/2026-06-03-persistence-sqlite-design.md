@@ -1,7 +1,7 @@
 # Design: Trading Architecture Refactor — Phase 1, Persistence (SQLite)
 
 Date: 2026-06-03
-Status: Approved (design) — pending written-spec review
+Status: Implemented (Phase 1) — see docs/superpowers/plans/2026-06-03-persistence-sqlite.md
 Branch: refactor/trading-architecture
 
 ## 1. Background & motivation
