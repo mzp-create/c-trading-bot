@@ -54,8 +54,9 @@ class BitfinexClient:
                 atexit.register(self.close)
         else:
             capital = float(config.get("trading", {}).get("initial_capital", 1000.0))
-            self._auth = PaperBroker(initial_capital=capital)
-            # Paper still wants REAL public tickers; build a keyless rest public.
+            names = [s.get("name") for s in
+                     config.get("trading", {}).get("symbols", []) if s.get("name")]
+            self._auth = PaperBroker(initial_capital=capital, base_symbols=names)
             self._ticker_source = _PublicTicker()
 
     def _start_ws(self, config, api_key, api_secret, ws_cfg):
