@@ -3,6 +3,8 @@
 - Auth methods (create_order/close_position/cancel/positions/balance/trades)
   use bfxapi in live, PaperBroker in paper.
 - Public data (ticker/ohlcv) always use real public sources (mode-agnostic).
+- In live mode, WS feed is wired in via _enable_ws; all methods route
+  WS-first with REST fallback.
 """
 
 import atexit
@@ -28,7 +30,11 @@ class BitfinexClient:
         self.mode = mode
         self.instance = instance
         self._ohlcv = OhlcvFetcher()
-        self._ticker_source = None  # set to rest (live) or a public source
+        self._ticker_source = None
+        self._market = None
+        self._account = None
+        self._feed = None
+        self._ticker_staleness = 15.0
 
         if mode == "live":
             from bitfinex.rest import BfxRest
@@ -42,16 +48,53 @@ class BitfinexClient:
                             api_key=api_key)
             self._auth = BfxRest(api_key=api_key, api_secret=api_secret)
             self._ticker_source = self._auth
+            ws_cfg = ex.get("ws", {})
+            if ws_cfg.get("enabled", True):
+                self._start_ws(config, api_key, api_secret, ws_cfg)
         else:
             capital = float(config.get("trading", {}).get("initial_capital", 1000.0))
             self._auth = PaperBroker(initial_capital=capital)
             # Paper still wants REAL public tickers; build a keyless rest public.
             self._ticker_source = _PublicTicker()
 
+    def _start_ws(self, config, api_key, api_secret, ws_cfg):
+        from state.market_state import MarketState
+        from state.account_state import AccountState
+        from bitfinex.ws_feed import WsFeed
+        symbols_cfg = config.get("trading", {}).get("symbols", [])
+        names = [s.get("name") for s in symbols_cfg if s.get("name")] or ["BTC/USDT"]
+        market, account = MarketState(), AccountState()
+        feed = WsFeed(
+            api_key, api_secret, names, market, account, self._auth,
+            ticker_staleness=float(ws_cfg.get("ticker_staleness_seconds", 15)),
+            order_confirm_timeout=float(ws_cfg.get("order_confirm_timeout_seconds", 10)),
+            reconcile_interval=float(ws_cfg.get("reconcile_interval_seconds", 90)),
+            wss_host=ws_cfg.get("wss_host"))
+        self._enable_ws(market=market, account=account, feed=feed,
+                        rest=self._auth,
+                        ticker_staleness=float(ws_cfg.get("ticker_staleness_seconds", 15)))
+        feed.start()
+
+    def _enable_ws(self, *, market, account, feed, rest, ticker_staleness):
+        """Wire WS state/feed into the client (also the test seam)."""
+        self._market = market
+        self._account = account
+        self._feed = feed
+        self._auth = rest          # REST fallback for reads/orders
+        self._ticker_source = rest  # ticker REST fallback == BfxRest (live)
+        self._ticker_staleness = ticker_staleness
+
+    def _ws_healthy(self) -> bool:
+        return self._feed is not None and self._feed.is_healthy()
+
     # ── orders (auth) ────────────────────────────────────────────────────
     def create_order(self, symbol: str, side: str, amount: float, *,
                      order_type: str = "market", price: Optional[float] = None,
                      reduce_only: bool = False) -> Order:
+        if self._ws_healthy():
+            return self._feed.submit_order_sync(
+                symbol, side, amount, order_type=order_type, price=price,
+                reduce_only=reduce_only)
         return self._auth.submit_order(symbol, side, amount, order_type=order_type,
                                        price=price, reduce_only=reduce_only)
 
@@ -61,15 +104,17 @@ class BitfinexClient:
             raise ValueError(f"no open position for {symbol}")
         close_side = "sell" if pos.side == "long" else "buy"
         price = self.fetch_ticker(symbol).last
-        return self._auth.submit_order(symbol, close_side, pos.abs_amount,
-                                       order_type="market", price=price,
-                                       reduce_only=True)
+        return self.create_order(symbol, close_side, pos.abs_amount,
+                                 order_type="market", price=price,
+                                 reduce_only=True)
 
     def cancel_order(self, order_id: int) -> Order:
-        return self._auth.cancel_order(order_id)
+        return self._auth.cancel_order(order_id)   # REST: rare path, reliable
 
     # ── reads (auth) ─────────────────────────────────────────────────────
     def fetch_positions(self) -> List[Position]:
+        if self._account is not None and self._account.authenticated:
+            return self._account.get_positions()
         return self._auth.get_positions()
 
     def fetch_position(self, symbol: str) -> Optional[Position]:
@@ -79,6 +124,8 @@ class BitfinexClient:
         return None
 
     def fetch_balance(self) -> List[Wallet]:
+        if self._account is not None and self._account.authenticated:
+            return self._account.get_wallets()
         return self._auth.get_wallets()
 
     def fetch_my_trades(self, symbol: Optional[str] = None, since=None,
@@ -87,11 +134,25 @@ class BitfinexClient:
 
     # ── public data (mode-agnostic) ──────────────────────────────────────
     def fetch_ticker(self, symbol: str) -> Ticker:
+        if (self._ws_healthy() and self._market is not None
+                and self._market.is_fresh(symbol, self._ticker_staleness)):
+            t = self._market.get_ticker(symbol)
+            if t is not None:
+                return t
         return self._ticker_source.get_ticker(symbol)
 
     def get_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200,
                   since: Optional[int] = None) -> Optional[pd.DataFrame]:
         return self._ohlcv.fetch_ohlcv(symbol, timeframe, limit, since)
+
+    def last_fill(self, symbol: str) -> Optional[Fill]:
+        if self._account is not None:
+            return self._account.last_fill(symbol)
+        return None
+
+    def close(self) -> None:
+        if self._feed is not None:
+            self._feed.stop()
 
 
 class _PublicTicker:
