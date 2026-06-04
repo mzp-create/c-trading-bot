@@ -13,6 +13,9 @@ data/trades.csv
 *.db-wal
 *.db-shm
 
+# Bitfinex per-instance key registry (runtime artifact)
+data/.bfx_key_registry.json
+
 # Logs
 logs/
 
