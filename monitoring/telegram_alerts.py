@@ -658,7 +658,7 @@ class TelegramNotifier:
             entry = p.get("entry_price", 0)
             side_raw = p.get("side", "long")
             direction = "🟢" if side_raw.lower() in ("buy", "long") else "🔴"
-            pnl = p.get("unrealized_pnl", p.get("unrealizedPnl", 0))
+            pnl = p.get("unrealized_pnl", 0)
             # SL/TP may not be in live position data from exchange
             sl = p.get("stop_loss")
             tp = p.get("take_profit")
