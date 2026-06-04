@@ -67,7 +67,13 @@ except ImportError:  # pragma: no cover - run.sh invocation
 
 SESSION_COOKIE = "dash_session"
 SESSION_TTL = 8 * 3600          # 8 hours
+LOGIN_TOKEN_TTL = 120           # seconds a /dashboard login link stays valid
 _USED_TOKENS: set = set()        # single dashboard process; consumes login tokens
+# Cap on retained consumed-nonces. The real replay guard is the token's 120 s
+# expiry (verify() rejects anything older); this set only blocks reuse *within*
+# that window. Reaching the cap requires far more logins than fit in one window,
+# so every entry is already expired — clearing it cannot enable a replay.
+_USED_TOKENS_MAX = 4096
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -315,8 +321,9 @@ def verify_password(request: Request,
             detail="Unauthorized",
             headers={"WWW-Authenticate": 'Basic realm="Hermes Trading Bot Dashboard"'},
         )
-    # Compare passwords (the password is the user field, no actual username)
-    if credentials.password != DASHBOARD_PASSWORD:
+    # Compare passwords (the password is the user field, no actual username).
+    # Constant-time to avoid leaking the password via response timing.
+    if not hmac.compare_digest(credentials.password, DASHBOARD_PASSWORD):
         raise HTTPException(
             status_code=401,
             detail="Invalid password",
@@ -326,14 +333,21 @@ def verify_password(request: Request,
 
 
 @app.get("/login")
-def login(token: str = ""):
+def login(request: Request, token: str = ""):
     """One-time token login: verify, set a session cookie, redirect to the app."""
+    if len(_USED_TOKENS) > _USED_TOKENS_MAX:
+        _USED_TOKENS.clear()
     if not _verify_token(DASHBOARD_PASSWORD, token, _USED_TOKENS):
         raise HTTPException(status_code=401, detail="Invalid or expired login link")
     resp = RedirectResponse(url="/", status_code=302)
+    # Mark the session cookie Secure when the request actually arrived over
+    # HTTPS (so it is never sent in cleartext), while still working on plain
+    # http://localhost for local use. Honors a proxy's X-Forwarded-Proto.
+    is_https = request.url.scheme == "https" or \
+        request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
     resp.set_cookie(
         SESSION_COOKIE, _mint_token(DASHBOARD_PASSWORD, ttl=SESSION_TTL),
-        httponly=True, samesite="lax", path="/")
+        httponly=True, samesite="lax", path="/", secure=is_https)
     return resp
 
 

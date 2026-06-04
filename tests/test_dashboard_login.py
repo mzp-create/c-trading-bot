@@ -38,3 +38,17 @@ def test_no_auth_still_401():
 def test_basic_auth_still_works():
     r = client.get("/api/status", auth=("", api.DASHBOARD_PASSWORD))
     assert r.status_code == 200
+
+
+def test_session_cookie_secure_over_https():
+    token = mint(api.DASHBOARD_PASSWORD, ttl=120)
+    https = TestClient(api.app, base_url="https://testserver")
+    r = https.get(f"/login?token={token}", follow_redirects=False)
+    assert r.status_code == 302
+    assert "secure" in r.headers["set-cookie"].lower()
+
+
+def test_session_cookie_not_secure_over_http():
+    token = mint(api.DASHBOARD_PASSWORD, ttl=120)
+    r = client.get(f"/login?token={token}", follow_redirects=False)
+    assert "secure" not in r.headers["set-cookie"].lower()
