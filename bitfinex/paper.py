@@ -36,7 +36,13 @@ class PaperBroker:
                      reduce_only: bool = False) -> Order:
         base, quote = symbol.split("/")
         ref = float(price or 0.0)
-        if order_type == "market":
+        if reduce_only:
+            # Close orders: use ref price directly (no slippage on close).
+            # This matches the legacy paper-mode close behaviour that the
+            # golden tests characterise (close PnL = (close_price - entry) * amount,
+            # no additional slippage drag on the exit).
+            fill_price = ref
+        elif order_type == "market":
             fill_price = ref * (1 + SLIPPAGE) if side == "buy" else ref * (1 - SLIPPAGE)
         else:
             fill_price = ref

@@ -4,22 +4,16 @@ Execution Engine — Hermes Crypto Trading Bot.
 Manages order placement, position tracking, and balance management in
 both **paper** and **live** modes.
 
-Paper mode:
-  - Tracks virtual balance
-  - Simulates slippage (0.05% for market orders)
-  - Applies exchange fees (0.1% taker, 0.0% maker per Bitfinex schedule)
-  - Tracks PnL per position
-  - Maintains simulated order book & trade history
-  - Stores trade log in the SQLite database (data/trading.db)
+Both modes use the same BitfinexClient path:
+  - Paper: BitfinexClient wraps PaperBroker (slippage/fee/wallet simulation)
+  - Live:  BitfinexClient wraps BfxRest / WsFeed (real exchange)
 
-Live mode:
-  - Uses BitfinexClient.create_order() for real execution
-  - Fetches actual positions and balance from exchange
-
-Both modes:
-  - Enforce rate limits
-  - Log every order attempt and result
-  - Handle errors gracefully
+Common:
+  - execute_order / close_position route through client.create_order()
+  - get_balance routes through client.fetch_balance()
+  - Position dicts carry SL/TP/trailing_stop fields for _check_positions
+  - All trades persist to SQLite via TradingRepository
+  - Rate limits enforced; errors handled gracefully
 """
 
 import os
@@ -45,9 +39,6 @@ logger = logging.getLogger(__name__)
 #  Constants
 # ---------------------------------------------------------------------------
 
-TAKER_FEE = 0.001   # 0.1%
-MAKER_FEE = 0.0     # 0.0%  (Bitfinex fee schedule)
-SLIPPAGE  = 0.0005  # 0.05% slippage for market orders
 DEFAULT_QUOTE = "USDT"
 
 # ---------------------------------------------------------------------------
@@ -90,10 +81,6 @@ class ExecutionEngine:
         self._trade_history: deque = deque(maxlen=1000)  # bounded to prevent memory leak (P2-16)
         self._next_order_id: int = 1
 
-        # Paper-only state
-        self._paper_balance: Dict[str, Dict[str, float]] = {}
-        self._init_paper_balance()
-
         # Rate limiting
         self._rate_limit = float(
             config.get("exchange", {}).get("rate_limit", 1.0)
@@ -115,13 +102,10 @@ class ExecutionEngine:
         self._repo = TradingRepository(db_path, instance=self.instance,
                                        mode=self.mode)
 
-        # Wire up BitfinexClient for live mode
-        self._client = None
-        if mode == "live":
-            from bitfinex import BitfinexClient
-            self._client = BitfinexClient(config, mode="live",
-                                          instance=self.instance)
-            self._log.info("Live mode: BitfinexClient connected")
+        # Build BitfinexClient for both paper and live modes
+        from bitfinex import BitfinexClient
+        self._client = BitfinexClient(config, mode=mode, instance=self.instance)
+        self._log.info("BitfinexClient connected (mode=%s)", mode)
 
         self._log.info("ExecutionEngine ready")
 
@@ -167,7 +151,7 @@ class ExecutionEngine:
         Called once per bot cycle (inside execute_trade_cycle) so every
         consumer of open_positions reads fresh-but-not-excessive data.
         """
-        if not self._client or self.mode == "paper":
+        if self.mode == "paper":
             return
         try:
             positions = self._get_live_positions()
@@ -197,9 +181,9 @@ class ExecutionEngine:
         This ensures that positions opened before the bot started are
         properly tracked with stop-loss and take-profit levels.
         """
-        if not self._client or self.mode == "paper":
+        if self.mode == "paper":
             return
-        
+
         self._log.info("Syncing positions from exchange at startup...")
         try:
             positions = self._get_live_positions()
@@ -327,16 +311,10 @@ class ExecutionEngine:
             reason="entry"))
 
         try:
-            if self.mode == "paper":
-                result = self._paper_execute_order(
-                    symbol, side, amount, price, order_type,
-                    stop_loss_pct, take_profit_pct,
-                )
-            else:
-                result = self._live_execute_order(
-                    symbol, side, amount, price, order_type,
-                    stop_loss_pct, take_profit_pct,
-                )
+            result = self._live_execute_order(
+                symbol, side, amount, price, order_type,
+                stop_loss_pct, take_profit_pct,
+            )
         except Exception as exc:
             self._log.error("Order execution failed: %s", exc, exc_info=True)
             self._repo.update_order(db_order_id, status="rejected", filled=0.0,
@@ -428,341 +406,21 @@ class ExecutionEngine:
     def get_balance(self, currency: str = DEFAULT_QUOTE) -> float:
         """Return available balance for a currency.
 
-        In paper mode returns virtual free balance.
-        In live mode queries the exchange.
+        Queries the client (PaperBroker in paper mode, exchange in live).
+        Returns a bare float (the available balance for `currency`).
         """
-        if self.mode == "paper":
-            bal = self._paper_balance.get(currency, {})
-            return bal.get("free", 0.0)
+        try:
+            wallets = self._client.fetch_balance()
+            # Typed: list[Wallet]; find the matching currency.
+            for w in wallets:
+                if w.currency == currency:
+                    return float(w.available)
+            return 0.0
+        except Exception as exc:
+            self._log.error("get_balance failed: %s", exc)
+            return 0.0
 
-        if self._client:
-            try:
-                wallets = self._client.fetch_balance()
-                # Typed: list[Wallet]; build a {currency: available} mapping.
-                free = {w.currency: w.available for w in wallets}
-                return free.get(currency, 0.0)
-            except Exception as exc:
-                self._log.error("Failed to fetch balance: %s", exc)
-        return 0.0
-
-    # ── paper trading internals ──────────────────────────────────────────
-
-    def _init_paper_balance(self):
-        """Seed paper balance from config — supports multi-pair allocation."""
-        initial_capital = float(
-            self.trading_config.get("initial_capital", 100.0)
-        )
-
-        # Start with all capital in USDT
-        self._paper_balance = {
-            DEFAULT_QUOTE: {
-                "free": initial_capital,
-                "used": 0.0,
-                "total": initial_capital,
-            },
-        }
-
-        # Initialize base currency balances for each configured symbol
-        raw_symbols = self.trading_config.get("symbols", [])
-        if not raw_symbols:
-            # Legacy single-symbol fallback
-            legacy_symbol = self.trading_config.get("symbol", "BTC/USDT")
-            base = legacy_symbol.split("/")[0]
-            self._paper_balance[base] = {"free": 0.0, "used": 0.0, "total": 0.0}
-        else:
-            for s in raw_symbols:
-                if not s.get("enabled", True):
-                    continue
-                base = s["name"].split("/")[0]
-                if base not in self._paper_balance:
-                    self._paper_balance[base] = {"free": 0.0, "used": 0.0, "total": 0.0}
-
-        self._open_positions = []
-        self._order_history = []
-
-    def _paper_execute_order(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        price: float,
-        order_type: str,
-        stop_loss_pct: Optional[float],
-        take_profit_pct: Optional[float],
-    ) -> Dict[str, Any]:
-        """Simulate order execution in paper mode.
-
-        Handles position-aware logic:
-          - Buying adds to long positions (or reduces a short).
-          - Selling adds to short positions (or reduces a long).
-        """
-        # --- Rate limit ---
-        self._enforce_rate_limit()
-
-        base, quote = symbol.split("/")
-
-        # Compute fill price with slippage
-        if order_type == "market":
-            slippage_mult = 1.0 + (SLIPPAGE if side == "buy" else -SLIPPAGE)
-            fill_price = price * slippage_mult
-        else:
-            fill_price = price
-
-        fee_rate = TAKER_FEE if order_type == "market" else MAKER_FEE
-        fee = fill_price * amount * fee_rate
-        cost = fill_price * amount
-        order_id = f"paper_{int(time.time() * 1000)}_{self._next_order_id:04d}"
-        self._next_order_id += 1
-
-        # Find existing opposing position to net against
-        existing_pos = None
-        for pos in self._open_positions:
-            if pos.get("symbol") == symbol and pos.get("side") != side:
-                existing_pos = pos
-                break
-
-        if existing_pos:
-            # We have an opposing position — net against it
-            existing_side = existing_pos["side"]
-            existing_amt = float(existing_pos["amount"])
-            existing_entry = float(existing_pos["entry_price"])
-
-            net_amount = existing_amt - amount
-            closed_amt = min(existing_amt, amount)
-
-            # PnL on the closed portion
-            if existing_side == "buy":
-                pnl = (fill_price - existing_entry) * closed_amt
-            else:
-                pnl = (existing_entry - fill_price) * closed_amt
-
-            # Subtract fee
-            pnl -= fee
-
-            if net_amount <= 0:
-                # Position fully closed (or reversed)
-                remaining = abs(net_amount)
-                self._open_positions.remove(existing_pos)
-                self._record_trade(
-                    existing_pos, fill_price, pnl,
-                    f"closed_{side}",
-                )
-                self._log.info(
-                    "Paper position closed: %s %.6f @ %.2f (pnl=%.2f)",
-                    symbol, closed_amt, fill_price, pnl,
-                )
-
-                if remaining > 0 and side == "buy":
-                    # Remaining is a new buy
-                    self._paper_balance[quote]["free"] -= cost
-                    self._paper_balance[quote]["total"] -= cost
-                    self._paper_balance[quote]["free"] -= fee
-                    self._paper_balance[quote]["total"] -= fee
-
-                    if base not in self._paper_balance:
-                        self._paper_balance[base] = {"free": 0.0, "used": 0.0, "total": 0.0}
-                    self._paper_balance[base]["free"] += amount
-                    self._paper_balance[base]["total"] += amount
-
-                    return self._create_paper_position(
-                        symbol, side, remaining, fill_price, order_type,
-                        fee, order_id, stop_loss_pct, take_profit_pct,
-                    )
-
-                elif remaining > 0 and side == "sell":
-                    # Remaining is a new sell
-                    self._paper_balance[base]["free"] -= amount
-                    self._paper_balance[base]["total"] -= amount
-                    self._paper_balance[quote]["free"] += cost - fee
-                    self._paper_balance[quote]["total"] += cost - fee
-
-                    return self._create_paper_position(
-                        symbol, side, remaining, fill_price, order_type,
-                        fee, order_id, stop_loss_pct, take_profit_pct,
-                    )
-                else:
-                    # Exactly closed (net_amount == 0)
-                    return {
-                        "success": True,
-                        "order_id": order_id,
-                        "filled_price": round(fill_price, 2),
-                        "amount": amount,
-                        "fee": round(fee, 8),
-                        "side": side,
-                        "pnl": round(pnl, 2),
-                        "position_closed": True,
-                    }
-
-            else:
-                # Reduced existing position
-                existing_pos["amount"] = net_amount
-                # Update balance
-                if existing_side == "buy":
-                    # Was long, sold some
-                    self._paper_balance[base]["free"] -= amount
-                    self._paper_balance[base]["total"] -= amount
-                    self._paper_balance[quote]["free"] += cost - fee
-                    self._paper_balance[quote]["total"] += cost - fee
-                else:
-                    # Was short, bought some
-                    self._paper_balance[quote]["free"] -= cost
-                    self._paper_balance[quote]["total"] -= cost
-                    self._paper_balance[quote]["free"] -= fee
-                    self._paper_balance[quote]["total"] -= fee
-                    if base not in self._paper_balance:
-                        self._paper_balance[base] = {"free": 0.0, "used": 0.0, "total": 0.0}
-                    self._paper_balance[base]["free"] += amount
-                    self._paper_balance[base]["total"] += amount
-
-                return {
-                    "success": True,
-                    "order_id": order_id,
-                    "filled_price": round(fill_price, 2),
-                    "amount": amount,
-                    "fee": round(fee, 8),
-                    "side": side,
-                    "pnl": round(pnl, 2),
-                    "position_partial_close": True,
-                }
-
-        # --- No opposing position: check balance ---
-        if side == "buy":
-            needed_quote = cost + fee  # Include fee in availability check (P1-7)
-            available = self._paper_balance.get(quote, {}).get("free", 0.0)
-            if needed_quote > available:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Insufficient {quote}: need {needed_quote:.2f}, "
-                        f"have {available:.2f}"
-                    ),
-                }
-        else:  # sell
-            available = self._paper_balance.get(base, {}).get("free", 0.0)
-            if amount > available:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Insufficient {base}: need {amount:.6f}, "
-                        f"have {available:.6f}"
-                    ),
-                }
-
-        # --- Update balances ---
-        if side == "buy":
-            self._paper_balance[quote]["free"] -= cost
-            self._paper_balance[quote]["total"] -= cost
-            self._paper_balance[quote]["free"] -= fee
-            self._paper_balance[quote]["total"] -= fee
-            if base not in self._paper_balance:
-                self._paper_balance[base] = {"free": 0.0, "used": 0.0, "total": 0.0}
-            self._paper_balance[base]["free"] += amount
-            self._paper_balance[base]["total"] += amount
-
-        else:  # sell
-            self._paper_balance[base]["free"] -= amount
-            self._paper_balance[base]["total"] -= amount
-            self._paper_balance[quote]["free"] += cost - fee
-            self._paper_balance[quote]["total"] += cost - fee
-
-        # --- Create new position record ---
-        return self._create_paper_position(
-            symbol, side, amount, fill_price, order_type,
-            fee, order_id, stop_loss_pct, take_profit_pct,
-        )
-
-    def _create_paper_position(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        fill_price: float,
-        order_type: str,
-        fee: float,
-        order_id: str,
-        stop_loss_pct: Optional[float],
-        take_profit_pct: Optional[float],
-    ) -> Dict[str, Any]:
-        """Create a new position record and add to open positions list."""
-        base, quote = symbol.split("/")
-
-        order = {
-            "order_id": order_id,
-            "symbol": symbol,
-            "side": side,
-            "amount": amount,
-            "entry_price": fill_price,
-            "order_type": order_type,
-            "fee": round(fee, 8),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-
-        if stop_loss_pct is not None:
-            sl_pct = abs(float(stop_loss_pct)) / 100.0
-            order["stop_loss"] = (
-                fill_price * (1.0 - sl_pct) if side == "buy"
-                else fill_price * (1.0 + sl_pct)
-            )
-        else:
-            order["stop_loss"] = 0.0
-
-        if take_profit_pct is not None:
-            tp_pct = abs(float(take_profit_pct)) / 100.0
-            order["take_profit"] = (
-                fill_price * (1.0 + tp_pct) if side == "buy"
-                else fill_price * (1.0 - tp_pct)
-            )
-        else:
-            order["take_profit"] = 0.0
-
-        order["trailing_stop"] = self.risk_config.get("trailing_stop", False)
-        order["highest_price"] = fill_price if side == "buy" else 0.0
-        order["lowest_price"] = fill_price if side == "sell" else float("inf")
-
-        self._open_positions.append(order)
-        self._order_history.append(order)
-
-        self._log.info(
-            "Paper order: id=%s %s %.6f @ %.2f (fee=%.6f %s)",
-            order_id, side.upper(), amount, fill_price, fee, quote,
-        )
-
-        return {
-            "success": True,
-            "order_id": order_id,
-            "filled_price": round(fill_price, 2),
-            "amount": amount,
-            "fee": round(fee, 8),
-            "side": side,
-        }
-
-    def _update_paper_balance_on_close(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        close_price: float,
-        fee: float,
-    ):
-        """Update paper balances after a position is closed."""
-        base, quote = symbol.split("/")
-        if side == "buy":
-            # We had base from the buy, now selling it
-            if base in self._paper_balance:
-                self._paper_balance[base]["free"] -= amount
-                self._paper_balance[base]["total"] -= amount
-            self._paper_balance[quote]["free"] += close_price * amount - fee
-            self._paper_balance[quote]["total"] += close_price * amount - fee
-        else:
-            # We had quote from the sell, now buying back
-            self._paper_balance[quote]["free"] += close_price * amount - fee
-            self._paper_balance[quote]["total"] += close_price * amount - fee
-            if base not in self._paper_balance:
-                self._paper_balance[base] = {"free": 0.0, "used": 0.0, "total": 0.0}
-            self._paper_balance[base]["free"] += amount
-            self._paper_balance[base]["total"] += amount
-
-    # ── live trading internals ───────────────────────────────────────────
+    # ── order execution internals ────────────────────────────────────────
 
     def _live_execute_order(
         self,
@@ -791,7 +449,13 @@ class ExecutionEngine:
             return {"success": False, "error": str(exc)}
 
         # Map typed Order -> engine's outward dict contract.
-        order_id = order.id if order.id is not None else f"live_{int(time.time())}"
+        # Paper broker returns small integer ids; live returns large integer ids.
+        # Produce a string id prefixed by mode so callers can distinguish.
+        _prefix = "paper" if self.mode == "paper" else "live"
+        if order.id is not None:
+            order_id = f"{_prefix}_{order.id}"
+        else:
+            order_id = f"{_prefix}_{int(time.time())}"
         fill_price = float(order.avg_price or price or 0)
         filled = float(order.filled or 0)
         fee_cost = float(order.fee or 0.0)
@@ -841,16 +505,15 @@ class ExecutionEngine:
         pos["highest_price"] = fill_price if side == "buy" else 0.0
         pos["lowest_price"] = fill_price if side == "sell" else float("inf")
 
-        # Store SL/TP metadata for live position tracking
-        if self.mode == "live":
-            self._live_position_meta[symbol] = {
-                "stop_loss": pos.get("stop_loss", 0.0),
-                "take_profit": pos.get("take_profit", 0.0),
-                "trailing_stop": pos.get("trailing_stop", False),
-                "highest_price": pos.get("highest_price", 0.0),
-                "lowest_price": pos.get("lowest_price", float("inf")),
-                "order_id": order_id,
-            }
+        # Store SL/TP metadata for position tracking (both paper and live)
+        self._live_position_meta[symbol] = {
+            "stop_loss": pos.get("stop_loss", 0.0),
+            "take_profit": pos.get("take_profit", 0.0),
+            "trailing_stop": pos.get("trailing_stop", False),
+            "highest_price": pos.get("highest_price", 0.0),
+            "lowest_price": pos.get("lowest_price", float("inf")),
+            "order_id": order_id,
+        }
 
         self._open_positions.append(pos)
         self._order_history.append(pos)
@@ -865,7 +528,7 @@ class ExecutionEngine:
             "order_id": order_id,
             "filled_price": round(fill_price, 2),
             "amount": filled,
-            "fee": fee_cost,
+            "fee": round(fee_cost, 8),
             "side": side,
         }
 
@@ -1084,101 +747,77 @@ class ExecutionEngine:
         close_side = "sell" if side == "buy" else "buy"
 
         try:
-            if self.mode == "paper":
-                # Paper mode: simulate closing at the current market price.
-                current_price = self._current_price(symbol, entry_price)
-                if close_side == "sell":
-                    pnl = (current_price - entry_price) * amount
-                else:
-                    pnl = (entry_price - current_price) * amount
+            # Unified path for both paper and live: send a reduceOnly market
+            # order so the position is CLOSED (not flipped).  PaperBroker
+            # simulates slippage/fee on the fill; the live client sends to the
+            # exchange.  We pass `price=ref` so PaperBroker can use it as the
+            # mid-point for slippage simulation (live bfxapi ignores price on
+            # market orders).
+            self._enforce_rate_limit()
+            ref = self._current_price(symbol, entry_price)
 
-                # Persist the close (position lifecycle + reduce-only order +
-                # fill); additive and never raises. See _persist_close.
+            try:
+                order = self._client.create_order(
+                    symbol, close_side, amount,
+                    order_type="market", price=ref, reduce_only=True)
+            except (OrderRejected, AckUnparseable) as exc:
+                self._log.error("Failed to close position: %s", exc)
+                return {"success": False, "pnl": 0.0, "price": 0.0,
+                        "error": str(exc)}
+
+            if order.is_accepted:
+                # Prefer the actual fill price (average), else fall back.
+                close_price = order.avg_price
+                if close_price in (None, 0, 0.0):
+                    close_price = ref
+                close_price = float(close_price)
+
+                if close_side == "sell":
+                    pnl = (close_price - entry_price) * amount
+                else:
+                    pnl = (entry_price - close_price) * amount
+
+                # Persist the close; additive and never raises.
+                fill = None
+                if hasattr(self._client, "last_fill"):
+                    try:
+                        fill = self._client.last_fill(symbol)
+                    except Exception:
+                        fill = None
+                fee = fill.fee if fill is not None else 0.0
+                fee_ccy = fill.fee_currency if fill is not None else None
                 self._persist_close(
                     symbol=symbol, side=side, close_side=close_side,
                     amount=amount, entry_price=entry_price,
-                    close_price=current_price, pnl=pnl, reason=reason,
-                    opened_at=position.get("timestamp"))
+                    close_price=close_price, pnl=pnl, reason=reason,
+                    opened_at=position.get("timestamp"),
+                    exchange_order_id=str(order.id) if order.id is not None
+                    else None, fee=fee, fee_currency=fee_ccy)
 
-                # Record trade
-                self._record_trade(position, current_price, pnl, reason)
-
-                # Remove from tracking
-                if position in self._open_positions:
-                    self._open_positions.remove(position)
+                # Journal the trade and clear local SL/TP metadata so the
+                # closed position is no longer tracked.
+                self._record_trade(position, close_price, pnl, reason)
                 if symbol in self._live_position_meta:
                     del self._live_position_meta[symbol]
+                self._open_positions = [
+                    p for p in self._open_positions
+                    if p.get("symbol") != symbol
+                ]
 
-                self._log.info(f"Paper position closed: {symbol} PnL=${pnl:.2f}")
+                self._log.info(
+                    "Position closed: %s PnL=$%.2f (mode=%s)",
+                    symbol, pnl, self.mode)
                 return {"success": True, "pnl": round(pnl, 2),
-                        "price": current_price, "error": None}
-
+                        "price": close_price, "error": None}
             else:
-                # Live mode: send a reduceOnly market order so the position is
-                # CLOSED (not flipped into an opposing one). Pass the unified
-                # symbol straight through — the client converts it internally.
-                self._enforce_rate_limit()
-
-                try:
-                    order = self._client.create_order(
-                        symbol, close_side, amount,
-                        order_type="market", price=None, reduce_only=True)
-                except (OrderRejected, AckUnparseable) as exc:
-                    self._log.error("Failed to close position: %s", exc)
-                    return {"success": False, "pnl": 0.0, "price": 0.0,
-                            "error": str(exc)}
-
-                if order.is_accepted:
-                    # Prefer the actual fill price (average), else fall back.
-                    close_price = order.avg_price
-                    if close_price in (None, 0, 0.0):
-                        close_price = self._current_price(symbol, entry_price)
-                    close_price = float(close_price)
-
-                    if close_side == "sell":
-                        pnl = (close_price - entry_price) * amount
-                    else:
-                        pnl = (entry_price - close_price) * amount
-
-                    # Persist the close; additive and never raises.
-                    fill = None
-                    if hasattr(self._client, "last_fill"):
-                        try:
-                            fill = self._client.last_fill(symbol)
-                        except Exception:
-                            fill = None
-                    fee = fill.fee if fill is not None else 0.0
-                    fee_ccy = fill.fee_currency if fill is not None else None
-                    self._persist_close(
-                        symbol=symbol, side=side, close_side=close_side,
-                        amount=amount, entry_price=entry_price,
-                        close_price=close_price, pnl=pnl, reason=reason,
-                        opened_at=position.get("timestamp"),
-                        exchange_order_id=str(order.id) if order.id is not None
-                        else None, fee=fee, fee_currency=fee_ccy)
-
-                    # Journal the trade and clear local SL/TP metadata so the
-                    # closed position is no longer tracked.
-                    self._record_trade(position, close_price, pnl, reason)
-                    if symbol in self._live_position_meta:
-                        del self._live_position_meta[symbol]
-                    self._open_positions = [
-                        p for p in self._open_positions
-                        if p.get("symbol") != symbol
-                    ]
-
-                    self._log.info(f"Live position closed: {symbol} PnL=${pnl:.2f}")
-                    return {"success": True, "pnl": round(pnl, 2),
-                            "price": close_price, "error": None}
-                else:
-                    # Failure: do NOT record a trade and do NOT delete meta.
-                    error = order.status or "Unknown error"
-                    self._log.error(f"Failed to close position: {error}")
-                    return {"success": False, "pnl": 0.0, "price": 0.0,
-                            "error": error}
+                # Failure: do NOT record a trade and do NOT delete meta.
+                error = order.status or "Unknown error"
+                self._log.error("Failed to close position: %s", error)
+                return {"success": False, "pnl": 0.0, "price": 0.0,
+                        "error": error}
 
         except Exception as exc:
-            self._log.error(f"Close position failed: {exc}", exc_info=True)
+            self._log.error("Close position failed: %s", exc, exc_info=True)
             return {"success": False, "pnl": 0.0, "price": 0.0,
                     "error": str(exc)}
 
