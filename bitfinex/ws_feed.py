@@ -2,8 +2,8 @@
 AccountState, and submits orders over WS with a sync cid-correlated bridge.
 
 Runs a daemon thread with its own asyncio loop. Handler methods are sync and
-directly unit-testable. On reconnect (re-auth) it REST-reconciles, because
-bfxapi snapshots fire only once per connection. Reuses bitfinex.rest mapping.
+directly unit-testable. Reconnect recovery is an unconditional periodic REST reconcile (bfxapi
+suppresses auth/snapshot events after the first connection). Reuses bitfinex.rest mapping.
 """
 
 import asyncio
@@ -138,6 +138,12 @@ class WsFeed:
     def is_healthy(self) -> bool:
         return self._account.connected and self._account.authenticated
 
+    def _mark_down(self) -> None:
+        """Mark the feed unhealthy so the client falls back to REST. Called when
+        the WS loop exits (incl. bfxapi's terminal ReconnectionTimeoutError,
+        which does NOT emit `disconnected`) and on stop()."""
+        self._account.set_status(connected=False, authenticated=False)
+
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self) -> None:
         if self._thread is not None:
@@ -162,6 +168,7 @@ class WsFeed:
         except Exception as exc:                # never crash the process
             log.error("WS feed loop exited: %s", exc)
         finally:
+            self._mark_down()
             loop.close()
 
     async def _main(self):
@@ -227,6 +234,7 @@ class WsFeed:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=5)
         self._thread = None
+        self._mark_down()
 
     # ── order bridge ─────────────────────────────────────────────────────
     def submit_order_sync(self, symbol: str, side: str, amount: float, *,

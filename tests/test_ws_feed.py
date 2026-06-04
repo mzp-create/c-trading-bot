@@ -87,3 +87,13 @@ def test_reconcile_pulls_positions_and_wallets_from_rest():
     assert acc.get_position("BTC/USDT").amount == 0.5
     assert acc.get_wallets()[0].balance == 538.0
     assert acc.last_reconcile is not None
+
+
+def test_mark_down_resets_status():
+    feed, _, acc = _feed()
+    feed._on_open()
+    feed._on_authenticated({})
+    assert feed.is_healthy() is True
+    feed._mark_down()
+    assert acc.connected is False and acc.authenticated is False
+    assert feed.is_healthy() is False

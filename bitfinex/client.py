@@ -51,6 +51,7 @@ class BitfinexClient:
             ws_cfg = ex.get("ws", {})
             if ws_cfg.get("enabled", True):
                 self._start_ws(config, api_key, api_secret, ws_cfg)
+                atexit.register(self.close)
         else:
             capital = float(config.get("trading", {}).get("initial_capital", 1000.0))
             self._auth = PaperBroker(initial_capital=capital)
