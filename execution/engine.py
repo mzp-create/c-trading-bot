@@ -13,18 +13,16 @@ Common:
   - get_balance routes through client.fetch_balance()
   - Position dicts carry SL/TP/trailing_stop fields for _check_positions
   - All trades persist to SQLite via TradingRepository
-  - Rate limits enforced; errors handled gracefully
+  - Transport-layer throttling delegated to the client; errors handled gracefully
 """
 
 import os
 import time
-import math
 import logging
 import random
 from pathlib import Path
-from collections import deque, defaultdict
+from collections import deque
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Optional, List, Dict, Any
 from copy import deepcopy
 
@@ -89,23 +87,10 @@ class ExecutionEngine:
             config.get("exchange", {}).get("trust_exchange_positions", False)
         )
 
-        # Rate limiting
-        self._rate_limit = float(
-            config.get("exchange", {}).get("rate_limit", 1.0)
-        )
-        self._last_api_call: float = 0.0
-
-        # Legacy trades.csv path — NO LONGER written by the engine (trades go
-        # to SQLite now). Retained only so the one-time CSV importer knows where
-        # the historical file lives, and to anchor the default DB path below.
-        trades_path = self.data_config.get("trades_file", "data/trades.csv")
-        self._trades_csv = Path(trades_path)
-        self._trades_csv.parent.mkdir(parents=True, exist_ok=True)
-
-        # SQLite persistence (single source of truth). Default the DB beside
-        # the trades file. Construction never raises — see TradingRepository.
+        # SQLite persistence (single source of truth). Construction never raises
+        # — see TradingRepository.
         db_path = self.data_config.get("db_file") or str(
-            self._trades_csv.parent / "trading.db")
+            Path(self.data_config.get("data_dir", "data")) / "trading.db")
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._repo = TradingRepository(db_path, instance=self.instance,
                                        mode=self.mode)
@@ -351,15 +336,14 @@ class ExecutionEngine:
             return False
 
         # Live
-        if self._client:
-            try:
-                order = self._client.cancel_order(order_id)
-                # Typed Order: no exception + CANCELED status means success.
-                if (order.status or "").upper() == "CANCELED":
-                    return True
-                self._log.error("Cancel failed: unexpected status %s", order.status)
-            except Exception as exc:
-                self._log.error("Cancel error: %s", exc)
+        try:
+            order = self._client.cancel_order(order_id)
+            # Typed Order: no exception + CANCELED status means success.
+            if (order.status or "").upper() == "CANCELED":
+                return True
+            self._log.error("Cancel failed: unexpected status %s", order.status)
+        except Exception as exc:
+            self._log.error("Cancel error: %s", exc)
         return False
 
     def get_position(self, symbol: str) -> Dict[str, Any]:
@@ -373,10 +357,6 @@ class ExecutionEngine:
             "entry_price": 0.0,
             "side": None,
         }
-
-    def get_open_positions(self) -> List[Dict[str, Any]]:
-        """Return all open positions."""
-        return self.open_positions  # delegates to property
 
     def close_all_positions(self):
         """Close all open positions."""
@@ -423,11 +403,6 @@ class ExecutionEngine:
         take_profit_pct: Optional[float],
     ) -> Dict[str, Any]:
         """Execute order via the exchange client."""
-        if self._client is None:
-            return {"success": False, "error": "No exchange client"}
-
-        self._enforce_rate_limit()
-
         try:
             order = self._client.create_order(
                 symbol, side, amount, order_type=order_type, price=price)
@@ -529,40 +504,6 @@ class ExecutionEngine:
             "fee": round(fee_cost, 8),
             "side": side,
         }
-
-    @staticmethod
-    def _normalize_symbol(symbol: str) -> str:
-        """Normalize any Bitfinex symbol representation to the unified display
-        form used throughout the bot (e.g. "BTC/USDT").
-
-        Accepts all three formats:
-          - t-format:   "tBTCUST"          -> "BTC/USDT"
-          - derivative: "BTC/USDT:USDT"    -> "BTC/USDT"
-          - unified:    "BTC/USDT"         -> "BTC/USDT"
-        """
-        if not symbol:
-            return ""
-        s = symbol.strip()
-
-        # Strip CCXT derivative suffix ":USDT" / ":USD" etc.
-        if ":" in s:
-            s = s.split(":", 1)[0]
-
-        # Already unified "BASE/QUOTE"
-        if "/" in s:
-            return s
-
-        # Bitfinex t-format e.g. tBTCUST / tBTCUSD
-        if s.startswith("t") and s[1:].isupper() and len(s) > 3:
-            body = s[1:]
-            if body.endswith("UST"):
-                return f"{body[:-3]}/USDT"
-            if body.endswith("USD"):
-                return f"{body[:-3]}/USD"
-            for quote in ("USDT", "BTC", "ETH"):
-                if body.endswith(quote):
-                    return f"{body[:-len(quote)]}/{quote}"
-        return s
 
     # ── trade history ────────────────────────────────────────────────────
 
@@ -694,7 +635,6 @@ class ExecutionEngine:
             # exchange.  We pass `price=ref` so PaperBroker can use it as the
             # mid-point for slippage simulation (live bfxapi ignores price on
             # market orders).
-            self._enforce_rate_limit()
             ref = self._current_price(symbol, entry_price)
 
             try:
@@ -759,31 +699,16 @@ class ExecutionEngine:
                     "error": str(exc)}
 
     def _current_price(self, symbol: str, fallback: float) -> float:
-        """Best-effort current market price for a symbol.
-
-        Uses the exchange client ticker when available; otherwise returns the
-        provided fallback (typically the entry price).
-        """
-        if self._client is not None:
-            try:
-                t = self._client.fetch_ticker(symbol)
-                # Typed Ticker: access attributes directly.
-                if t.last:
-                    return float(t.last)
-                if t.bid and t.ask:
-                    return (t.bid + t.ask) / 2.0
-            except Exception as exc:
-                self._log.warning("Could not fetch current price for %s: %s", symbol, exc)
+        """Best-effort current market price for a symbol."""
+        try:
+            t = self._client.fetch_ticker(symbol)   # client already does WS/REST
+            if t.last:
+                return float(t.last)
+            if t.bid and t.ask:
+                return (t.bid + t.ask) / 2.0
+        except Exception as exc:
+            self._log.warning("price fetch failed for %s: %s", symbol, exc)
         return float(fallback)
-
-    # ── rate limiting ────────────────────────────────────────────────────
-
-    def _enforce_rate_limit(self):
-        """Sleep if needed to respect the configured rate limit."""
-        elapsed = time.time() - self._last_api_call
-        if elapsed < self._rate_limit:
-            time.sleep(self._rate_limit - elapsed)
-        self._last_api_call = time.time()
 
     # ── utility ──────────────────────────────────────────────────────────
 

@@ -248,17 +248,8 @@ def test_client_close_position_uses_reduce_only(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-#  (d) symbol normalization to unified display form
+#  (d) open_positions returns unified symbol from typed Position objects
 # ---------------------------------------------------------------------------
-
-def test_symbol_normalization():
-    norm = ExecutionEngine._normalize_symbol
-    assert norm("tBTCUST") == "BTC/USDT"
-    assert norm("BTC/USDT:USDT") == "BTC/USDT"
-    assert norm("BTC/USDT") == "BTC/USDT"
-    assert norm("tETHUSD") == "ETH/USD"
-    assert norm("ETH/USD:USD") == "ETH/USD"
-
 
 def test_open_positions_maps_unified_symbol(tmp_path):
     cfg = _paper_config(tmp_path)

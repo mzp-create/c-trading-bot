@@ -40,9 +40,9 @@ def test_record_trade_writes_to_db(tmp_path):
     assert len(eng._trade_history) == 1
 
 
-def test_db_path_defaults_beside_trades_file(tmp_path):
-    config = {"data": {"trades_file": str(tmp_path / "sub" / "trades.csv")},
-              "exchange": {"rate_limit": 0.0}}
+def test_db_path_defaults_to_data_dir(tmp_path):
+    config = {"data": {"data_dir": str(tmp_path / "sub")},
+              "exchange": {}}
     eng = ExecutionEngine(config, mode="paper", trade_direction="both")
     assert (tmp_path / "sub" / "trading.db").exists()
 
