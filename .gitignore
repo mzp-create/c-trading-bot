@@ -32,3 +32,7 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+data/.bfx_nonce_shared
+data/.bfx_nonce
+instances/
+data/models/

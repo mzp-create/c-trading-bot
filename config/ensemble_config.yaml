@@ -1,0 +1,56 @@
+# Ensemble Strategy Configuration
+# Add this to your bot configuration to enable ML+RL ensemble trading
+
+ensemble_strategy:
+  enabled: true
+  
+  # Symbols to trade with ensemble
+  symbols:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+  
+  # Model weights (must sum to 1.0)
+  # Higher weight = more influence on final decision
+  weights:
+    ml: 0.4    # ML direction prediction
+    rl: 0.6    # RL timing and sizing
+  
+  # Confidence threshold for trading
+  # Only trade when ensemble confidence is above this level
+  # Lower = more signals (0.20 good for new models), higher = safer (0.65 for mature models)
+  confidence_threshold: 0.20
+  
+  # Require both ML and RL to agree?
+  # If true, only trade when both signals match
+  agreement_required: false
+  
+  # Position sizing
+  use_dynamic_sizing: true
+  
+  # Max position size (% of account)
+  max_position_pct: 0.95
+  
+  # Timeframes for analysis
+  timeframe: "1h"
+  
+  # Model paths (auto-detected if not specified)
+  models:
+    ml_dir: "data/models"
+    rl_dir: "data/models/rl"
+
+# Performance tracking
+logging:
+  log_predictions: true
+  log_interval: 10  # Log every N signals
+
+# Safety settings
+safety:
+  # Maximum trades per hour
+  max_trades_per_hour: 10
+  
+  # Cooldown between trades (minutes)
+  trade_cooldown: 5
+  
+  # Stop if drawdown exceeds (%)
+  max_drawdown_pct: 10.0

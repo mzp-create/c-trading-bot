@@ -1,0 +1,134 @@
+# Crypto Trading Bot — Configuration for $5,000 Capital
+trading:
+  symbols:
+    - name: "BTC/USDT"
+      symbol: "tBTCUST"
+      allocation_pct: 50.0  # 50% of capital = $2,500
+      enabled: true
+    - name: "ETH/USDT"
+      symbol: "tETHUST"
+      allocation_pct: 30.0  # 30% of capital = $1,500
+      enabled: true
+    - name: "SOL/USDT"
+      symbol: "tSOLUST"
+      allocation_pct: 20.0  # 20% of capital = $1,000
+      enabled: true
+  initial_capital: 5000.0  # USDT total across all pairs
+  daily_target: 200.0      # $200/day = 4% daily (moderate-aggressive)
+  max_risk_per_trade: 0.02  # 2% max risk per trade = $100
+  max_open_positions: 6     # 2 per pair max
+  position_size_mode: "dynamic"
+
+exchange:
+  name: "bitfinex"
+  testnet: false
+  rate_limit: 1.0
+  ws_reconnect_delay: 5
+  default_type: "margin"
+  api_key: "${BITFINEX_API_KEY}"
+  api_secret: "${BITFINEX_API_SECRET}"
+
+strategies:
+  enabled: ["trend_following", "grid"]
+  trend_following:
+    enabled: true
+    weight: 0.4
+    timeframe: "1h"
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+  scalping:
+    enabled: false
+    weight: 0.35
+    timeframe: "5m"
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    bb_period: 20
+    bb_std: 2.0
+  grid:
+    enabled: true
+    weight: 0.25
+    timeframe: "15m"
+    grid_levels: 10
+    grid_spread_pct: 0.5
+
+ml:
+  enabled: true
+  model_type: "xgboost"
+  features:
+    - "rsi"
+    - "macd"
+    - "bb_upper"
+    - "bb_lower"
+    - "ema_9"
+    - "ema_21"
+    - "volume_sma"
+    - "price_change_1h"
+    - "price_change_4h"
+    - "volatility"
+  lookback: 48
+  retrain_interval: 24
+  min_train_samples: 100
+
+regime_detector:
+  enabled: true
+  adx_trending_threshold: 25
+  adx_ranging_threshold: 20
+  volatility_ratio_threshold: 1.5
+  lookback: 50
+  trend_lookback: 14
+  max_correlation: 0.7
+  regime_params:
+    TRENDING:
+      stop_loss_mult: 1.2
+      take_profit_mult: 1.5
+      position_size_mult: 1.0
+    RANGING:
+      stop_loss_mult: 0.8
+      take_profit_mult: 0.7
+      position_size_mult: 0.8
+    VOLATILE:
+      stop_loss_mult: 1.5
+      take_profit_mult: 1.0
+      position_size_mult: 0.5
+
+sentiment:
+  enabled: true
+  cache_ttl: 300
+  source_weights:
+    rss: 1.0
+    newsapi: 0.5
+    reddit: 0.5
+  llm_model: ""
+  filter_strength: "normal"
+
+risk:
+  max_daily_loss: 100.0    # Stop trading after $100 daily loss (2% of capital)
+  max_drawdown_pct: 15.0   # Max drawdown before stopping
+  stop_loss_pct: 2.0       # Per position stop loss
+  take_profit_pct: 4.0     # Per position take profit
+  trailing_stop: true
+  trailing_stop_activation: 2.0
+  trailing_stop_distance: 0.5
+  cooldown_after_loss: 300
+
+monitoring:
+  log_level: "INFO"
+  save_trades: true
+  save_equity_curve: true
+  telegram_alerts: true
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  alert_on_trade: true
+  alert_on_drawdown: true
+  daily_summary: true
+
+data:
+  ohlcv_dir: "data/ohlcv/"
+  models_dir: "data/models/"
+  trades_file: "data/trades.csv"
+  equity_file: "data/equity.csv"
+  log_file: "logs/bot.log"
