@@ -13,7 +13,7 @@ from typing import Optional, Dict, List, Any
 
 import pandas as pd
 
-from market_data.bitfinex_client import BitfinexClient, create_bitfinex_client
+from bitfinex import BitfinexClient
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,9 @@ class MarketDataCollector:
             mode = "paper"
         mode = config.get("trading", {}).get("mode", mode)
 
-        self._client: BitfinexClient = create_bitfinex_client(config, mode=mode)
+        self._client: BitfinexClient = BitfinexClient(
+            config, mode=mode, instance=config.get("instance", "default")
+        )
 
         # Cache directory
         self._cache_dir = Path(
@@ -134,17 +136,10 @@ class MarketDataCollector:
 
         Returns None if ticker data is unavailable.
         """
-        ticker = self._client.fetch_ticker(symbol)
-        bid = ticker.get("bid", 0.0)
-        ask = ticker.get("ask", 0.0)
-        if bid > 0 and ask > 0:
-            return (bid + ask) / 2.0
-        last = ticker.get("last", 0.0)
-        return last if last > 0 else None
-
-    def get_orderbook(self, symbol: str) -> dict:
-        """Return the current order book (bids / asks)."""
-        return self._client.fetch_orderbook(symbol)
+        t = self._client.fetch_ticker(symbol)
+        if t.bid > 0 and t.ask > 0:
+            return (t.bid + t.ask) / 2.0
+        return t.last if t.last > 0 else None
 
     def get_multiple_timeframes(
         self,
@@ -205,7 +200,7 @@ class MarketDataCollector:
         """
         self._log.info("Fetching historical %s %s since %d", symbol, timeframe, since)
         try:
-            df = self._client.fetch_ohlcv(
+            df = self._client.get_ohlcv(
                 symbol, timeframe=timeframe, since=since, limit=limit
             )
         except Exception as exc:
@@ -299,16 +294,16 @@ class MarketDataCollector:
 
         for attempt in range(1, retries + 1):
             try:
-                df = self._client.fetch_ohlcv(symbol, timeframe, limit, since=since)
+                df = self._client.get_ohlcv(symbol, timeframe, limit, since=since)
                 if df is not None and not df.empty:
                     return df
 
                 self._log.warning(
-                    "fetch_ohlcv returned empty (attempt %d/%d)", attempt, retries
+                    "get_ohlcv returned empty (attempt %d/%d)", attempt, retries
                 )
             except Exception as exc:
                 self._log.error(
-                    "fetch_ohlcv attempt %d/%d failed: %s", attempt, retries, exc
+                    "get_ohlcv attempt %d/%d failed: %s", attempt, retries, exc
                 )
 
             if attempt < retries:
