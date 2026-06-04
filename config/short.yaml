@@ -33,6 +33,12 @@ exchange:
   testnet: false
   rate_limit: 1.0
   ws_reconnect_delay: 5
+  ws:
+    enabled: true                       # false => pure Phase-2 REST behavior
+    wss_host: "wss://api.bitfinex.com/ws/2"
+    ticker_staleness_seconds: 15
+    order_confirm_timeout_seconds: 10
+    reconcile_interval_seconds: 90      # periodic REST reconcile (reconnect recovery)
   default_type: "margin"  # Use margin wallet (required for shorts)
   # NONCE / API-KEY ISOLATION  (read before running dual instances)
   # CCXT manages nonces internally, BUT Bitfinex requires each request's nonce
