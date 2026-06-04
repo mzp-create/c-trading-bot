@@ -229,6 +229,76 @@ class WsFeed:
         thread.join(timeout=5)
         self._thread = None
 
-    # ── order bridge (Task 4 adds submit/cancel + _on_req_notification) ──
+    # ── order bridge ─────────────────────────────────────────────────────
+    def submit_order_sync(self, symbol: str, side: str, amount: float, *,
+                          order_type: str = "market",
+                          price: Optional[float] = None,
+                          reduce_only: bool = False,
+                          timeout: Optional[float] = None) -> Order:
+        timeout = timeout or self._order_confirm_timeout
+        cid = next(self._cid)
+        ev, holder = threading.Event(), {}
+        with self._pending_lock:
+            self._pending[cid] = (ev, holder)
+        try:
+            self._send_submit(symbol, side, amount, order_type, price,
+                              reduce_only, cid)
+            if not ev.wait(timeout):
+                raise AckUnparseable(
+                    f"WS order cid={cid} unconfirmed within {timeout}s")
+            if "error" in holder:
+                raise holder["error"]
+            return holder["order"]
+        finally:
+            with self._pending_lock:
+                self._pending.pop(cid, None)
+
+    def cancel_order_sync(self, order_id: int,
+                          timeout: Optional[float] = None) -> Order:
+        timeout = timeout or self._order_confirm_timeout
+        cid = next(self._cid)
+        ev, holder = threading.Event(), {}
+        with self._pending_lock:
+            self._pending[cid] = (ev, holder)
+        try:
+            self._send_cancel(order_id, cid)
+            if not ev.wait(timeout):
+                raise AckUnparseable(
+                    f"WS cancel cid={cid} unconfirmed within {timeout}s")
+            if "error" in holder:
+                raise holder["error"]
+            return holder["order"]
+        finally:
+            with self._pending_lock:
+                self._pending.pop(cid, None)
+
+    def _send_submit(self, symbol, side, amount, order_type, price,
+                     reduce_only, cid):
+        bfx_symbol = symbols.to_bitfinex(symbol)
+        signed = abs(amount) if side.lower() == "buy" else -abs(amount)
+        bfx_type = "MARKET" if order_type.lower() == "market" else "LIMIT"
+        flags = REDUCE_ONLY if reduce_only else 0
+        coro = self._bfx.wss.inputs.submit_order(
+            type=bfx_type, symbol=bfx_symbol, amount=f"{signed:.8f}",
+            price=f"{price or 0}", flags=flags, cid=cid)
+        asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    def _send_cancel(self, order_id, cid):
+        coro = self._bfx.wss.inputs.cancel_order(id=order_id, cid=cid)
+        asyncio.run_coroutine_threadsafe(coro, self._loop)
+
     def _on_req_notification(self, notif):
-        raise NotImplementedError  # implemented in Task 4
+        data = getattr(notif, "data", None)
+        cid = getattr(data, "cid", None)
+        if cid is None:
+            return
+        with self._pending_lock:
+            entry = self._pending.get(cid)
+        if entry is None:
+            return
+        ev, holder = entry
+        if getattr(notif, "status", None) == "ERROR":
+            holder["error"] = OrderRejected(getattr(notif, "text", "rejected"))
+        else:
+            holder["order"] = self._order(data)
+        ev.set()
