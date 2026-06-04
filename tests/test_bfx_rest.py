@@ -121,7 +121,7 @@ def test_get_positions_typed():
 def test_get_wallets_and_ticker_typed():
     r = _rest()
     w = r.get_wallets()[0]
-    assert (w.currency, w.wallet_type, w.balance) == ("UST", "margin", 538.0)
+    assert (w.currency, w.wallet_type, w.balance) == ("USDT", "margin", 538.0)
     t = r.get_ticker("BTC/USDT")
     assert (t.bid, t.ask, t.last) == (99.0, 101.0, 100.0)
 

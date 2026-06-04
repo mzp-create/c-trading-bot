@@ -13,6 +13,9 @@ log = logging.getLogger(__name__)
 
 REDUCE_ONLY = 1024  # Bitfinex flag bitmask (no enum in bfxapi)
 
+# Bitfinex currency ticker -> display currency.
+_CCY_TO_DISPLAY = {"UST": "USDT"}
+
 
 class BfxRest:
     def __init__(self, api_key: str, api_secret: str, client=None):
@@ -78,7 +81,8 @@ class BfxRest:
         return out
 
     def get_wallets(self) -> List[Wallet]:
-        return [Wallet(currency=w.currency, wallet_type=w.wallet_type,
+        return [Wallet(currency=_CCY_TO_DISPLAY.get(w.currency, w.currency),
+                       wallet_type=w.wallet_type,
                        balance=float(w.balance or 0.0),
                        available=float(getattr(w, "available_balance", 0.0) or 0.0))
                 for w in self._client.rest.auth.get_wallets()]
@@ -100,7 +104,8 @@ class BfxRest:
                 symbol=symbols.to_display(t.symbol),
                 side="buy" if amt > 0 else "sell", amount=abs(amt),
                 price=float(t.exec_price), fee=float(t.fee or 0.0),
-                fee_currency=getattr(t, "fee_currency", None),
+                fee_currency=_CCY_TO_DISPLAY.get(getattr(t, "fee_currency", None),
+                                                 getattr(t, "fee_currency", None)),
                 order_id=getattr(t, "order_id", None), trade_id=t.id,
                 ts=datetime.fromtimestamp((t.mts_create or 0) / 1000,
                                           tz=timezone.utc).isoformat()))
