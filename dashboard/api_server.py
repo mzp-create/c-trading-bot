@@ -6,6 +6,7 @@ configuration, and summary statistics. Serves a single-page HTML dashboard.
 """
 
 import os
+import re
 import time
 import logging
 import hashlib
@@ -18,7 +19,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 import yaml
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -55,6 +56,18 @@ print(f"  📁 Saved to:  {PASSWORD_FILE}")
 print(f"{'='*60}\n")
 
 security = HTTPBasic(auto_error=False)
+
+# ── one-time-token login + session cookie ──────────────────────────────────
+# Import works whether loaded as `dashboard.api_server` (tests, from repo root)
+# or as `api_server` (run.sh: `cd dashboard && uvicorn api_server:app`).
+try:
+    from dashboard.login_token import mint as _mint_token, verify as _verify_token
+except ImportError:  # pragma: no cover - run.sh invocation
+    from login_token import mint as _mint_token, verify as _verify_token
+
+SESSION_COOKIE = "dash_session"
+SESSION_TTL = 8 * 3600          # 8 hours
+_USED_TOKENS: set = set()        # single dashboard process; consumes login tokens
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -250,7 +263,6 @@ def parse_bot_status_from_log(log_lines: list[str]) -> dict:
             elif "SELL" in line:
                 status["last_analysis"] = "SELL"
             # Try to extract confidence
-            import re
             m = re.search(r"conf:\s*([\d.]+)", line)
             if m:
                 status["last_analysis_confidence"] = float(m.group(1))
@@ -290,8 +302,12 @@ def _extract_timestamp(line: str) -> str:
 app = FastAPI(title="Hermes Trading Bot Dashboard", version="1.0.0")
 
 
-def verify_password(credentials: HTTPBasicCredentials = Depends(security)):
-    """Verify dashboard password. Returns 401 if wrong."""
+def verify_password(request: Request,
+                    credentials: HTTPBasicCredentials = Depends(security)):
+    """Authorize via a valid `dash_session` cookie OR HTTP Basic password."""
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie and _verify_token(DASHBOARD_PASSWORD, cookie):   # no used-set: reusable
+        return True
     if credentials is None:
         # No auth header — redirect to login form (handled by frontend)
         raise HTTPException(
@@ -300,14 +316,25 @@ def verify_password(credentials: HTTPBasicCredentials = Depends(security)):
             headers={"WWW-Authenticate": 'Basic realm="Hermes Trading Bot Dashboard"'},
         )
     # Compare passwords (the password is the user field, no actual username)
-    provided = credentials.password
-    if provided != DASHBOARD_PASSWORD:
+    if credentials.password != DASHBOARD_PASSWORD:
         raise HTTPException(
             status_code=401,
             detail="Invalid password",
             headers={"WWW-Authenticate": 'Basic realm="Hermes Trading Bot Dashboard"'},
         )
     return True
+
+
+@app.get("/login")
+def login(token: str = ""):
+    """One-time token login: verify, set a session cookie, redirect to the app."""
+    if not _verify_token(DASHBOARD_PASSWORD, token, _USED_TOKENS):
+        raise HTTPException(status_code=401, detail="Invalid or expired login link")
+    resp = RedirectResponse(url="/", status_code=302)
+    resp.set_cookie(
+        SESSION_COOKIE, _mint_token(DASHBOARD_PASSWORD, ttl=SESSION_TTL),
+        httponly=True, samesite="lax", path="/")
+    return resp
 
 
 # CORS — restrict to localhost only (P3-20)
