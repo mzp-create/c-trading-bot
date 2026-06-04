@@ -203,7 +203,6 @@ class WsFeed:
         wss.on("trade_execution", lambda t: self._safe(self._on_fill, t))
         wss.on("trade_execution_update", lambda t: self._safe(self._on_fill, t))
         wss.on("on-req-notification", lambda n: self._safe(self._on_req_notification, n))
-        wss.on("oc-req-notification", lambda n: self._safe(self._on_req_notification, n))
 
     def _safe(self, fn, *args):
         try:
@@ -253,25 +252,6 @@ class WsFeed:
             with self._pending_lock:
                 self._pending.pop(cid, None)
 
-    def cancel_order_sync(self, order_id: int,
-                          timeout: Optional[float] = None) -> Order:
-        timeout = timeout or self._order_confirm_timeout
-        cid = next(self._cid)
-        ev, holder = threading.Event(), {}
-        with self._pending_lock:
-            self._pending[cid] = (ev, holder)
-        try:
-            self._send_cancel(order_id, cid)
-            if not ev.wait(timeout):
-                raise AckUnparseable(
-                    f"WS cancel cid={cid} unconfirmed within {timeout}s")
-            if "error" in holder:
-                raise holder["error"]
-            return holder["order"]
-        finally:
-            with self._pending_lock:
-                self._pending.pop(cid, None)
-
     def _send_submit(self, symbol, side, amount, order_type, price,
                      reduce_only, cid):
         bfx_symbol = symbols.to_bitfinex(symbol)
@@ -281,10 +261,6 @@ class WsFeed:
         coro = self._bfx.wss.inputs.submit_order(
             type=bfx_type, symbol=bfx_symbol, amount=f"{signed:.8f}",
             price=f"{price or 0}", flags=flags, cid=cid)
-        asyncio.run_coroutine_threadsafe(coro, self._loop)
-
-    def _send_cancel(self, order_id, cid):
-        coro = self._bfx.wss.inputs.cancel_order(id=order_id, cid=cid)
         asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def _on_req_notification(self, notif):
