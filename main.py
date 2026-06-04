@@ -880,6 +880,10 @@ class TradingBot:
         """Clean shutdown."""
         self.log.info("Shutting down bot...")
         self.executor.close_all_positions()
+        try:
+            self.executor.close()
+        except Exception:
+            pass
         # Save all ML models
         for s in self.symbols:
             symbol = s['name']

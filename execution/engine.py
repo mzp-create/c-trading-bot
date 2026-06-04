@@ -963,7 +963,7 @@ class ExecutionEngine:
 
     def _persist_close(self, *, symbol, side, close_side, amount, entry_price,
                        close_price, pnl, reason, opened_at,
-                       exchange_order_id=None):
+                       exchange_order_id=None, fee=0.0, fee_currency=None):
         """Persist a position close: a synthetic open+close position row, a
         reduce-only close order, and its fill. All calls go through the
         repository's _safe guard, so this never raises into the trading path.
@@ -988,7 +988,17 @@ class ExecutionEngine:
             avg_price=close_price, exchange_order_id=exchange_order_id))
         self._repo.record_fill(FillRecord(
             ts=now, symbol=symbol, side=close_side, amount=abs(amount),
-            price=close_price, order_id=close_oid))
+            price=close_price, order_id=close_oid, fee=fee,
+            fee_currency=fee_currency))
+
+    def close(self) -> None:
+        """Stop the live WS feed (if any). Safe in paper mode."""
+        client = getattr(self, "_client", None)
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception as exc:
+                self._log.error("client close failed: %s", exc)
 
     def _record_trade(
         self,
@@ -1131,13 +1141,21 @@ class ExecutionEngine:
                         pnl = (entry_price - close_price) * amount
 
                     # Persist the close; additive and never raises.
+                    fill = None
+                    if hasattr(self._client, "last_fill"):
+                        try:
+                            fill = self._client.last_fill(symbol)
+                        except Exception:
+                            fill = None
+                    fee = fill.fee if fill is not None else 0.0
+                    fee_ccy = fill.fee_currency if fill is not None else None
                     self._persist_close(
                         symbol=symbol, side=side, close_side=close_side,
                         amount=amount, entry_price=entry_price,
                         close_price=close_price, pnl=pnl, reason=reason,
                         opened_at=position.get("timestamp"),
                         exchange_order_id=str(order.id) if order.id is not None
-                        else None)
+                        else None, fee=fee, fee_currency=fee_ccy)
 
                     # Journal the trade and clear local SL/TP metadata so the
                     # closed position is no longer tracked.
