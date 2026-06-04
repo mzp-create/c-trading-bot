@@ -117,8 +117,10 @@ class ExecutionEngine:
         # Wire up BitfinexClient for live mode
         self._client = None
         if mode == "live":
-            from market_data.bitfinex_client import BitfinexClient
-            self._client = BitfinexClient(config, mode="live")
+            from bitfinex import BitfinexClient
+            from bitfinex.errors import OrderRejected, AckUnparseable  # noqa: F401
+            self._client = BitfinexClient(config, mode="live",
+                                          instance=self.instance)
             self._log.info("Live mode: BitfinexClient connected")
 
         self._log.info("ExecutionEngine ready")
@@ -375,10 +377,11 @@ class ExecutionEngine:
         # Live
         if self._client:
             try:
-                result = self._client.cancel_order(order_id)
-                if result.get("status") == "canceled" or "error" not in result:
+                order = self._client.cancel_order(order_id)
+                # Typed Order: no exception + CANCELED status means success.
+                if (order.status or "").upper() == "CANCELED":
                     return True
-                self._log.error("Cancel failed: %s", result.get("error"))
+                self._log.error("Cancel failed: unexpected status %s", order.status)
             except Exception as exc:
                 self._log.error("Cancel error: %s", exc)
         return False
@@ -434,12 +437,10 @@ class ExecutionEngine:
 
         if self._client:
             try:
-                bal = self._client.fetch_balance()
-                if isinstance(bal, dict):
-                    curr = bal.get(currency, {})
-                    if isinstance(curr, dict):
-                        return curr.get("free", 0.0)
-                    return float(curr) if curr else 0.0
+                wallets = self._client.fetch_balance()
+                # Typed: list[Wallet]; build a {currency: available} mapping.
+                free = {w.currency: w.available for w in wallets}
+                return free.get(currency, 0.0)
             except Exception as exc:
                 self._log.error("Failed to fetch balance: %s", exc)
         return 0.0
@@ -779,27 +780,41 @@ class ExecutionEngine:
 
         self._enforce_rate_limit()
 
+        from bitfinex.errors import OrderRejected, AckUnparseable
         try:
-            result = self._client.create_order(
-                symbol, order_type, side, amount, price
-            )
+            order = self._client.create_order(
+                symbol, side, amount, order_type=order_type, price=price)
+        except (OrderRejected, AckUnparseable) as exc:
+            self._log.error("Live order failed (%s): %s", type(exc).__name__, exc)
+            return {"success": False, "error": str(exc)}
         except Exception as exc:
             self._log.error("Live order failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
-        # Normalized contract: success=False means the order was rejected.
-        if not result.get("success"):
-            return {"success": False, "error": result.get("error") or "Order rejected"}
+        # Map typed Order -> engine's outward dict contract.
+        order_id = order.id if order.id is not None else f"live_{int(time.time())}"
+        fill_price = float(order.avg_price or price or 0)
+        filled = float(order.filled or 0)
+        fee_cost = float(order.fee or 0.0)
 
-        order_id = result.get("id") or f"live_{int(time.time())}"
-        fill_price = float(result.get("average") or price or 0)
-        filled = float(result.get("filled", 0) or 0)
-        fee_cost = float(((result.get("raw") or {}).get("fee") or {}).get("cost", 0.0) or 0.0)
-        
+        result = {
+            "success": order.is_filled,
+            "id": order.id,
+            "average": fill_price,
+            "filled": filled or amount,
+            "fee": fee_cost,
+            "error": None if order.is_filled else order.status,
+            "order_id": order_id,
+        }
+
+        if not result["success"]:
+            return {"success": False,
+                    "error": result["error"] or "Order not filled"}
+
         # For market orders that show 0 filled, assume full fill
-        # (the order should fill immediately, polling is done in bitfinex_client)
         if order_type == "market" and filled == 0:
             filled = amount
+            result["filled"] = amount
             self._log.info("Market order assumed filled: %s @ %s", amount, fill_price)
 
         # Record position locally for tracking
@@ -908,18 +923,16 @@ class ExecutionEngine:
         if not self._client:
             return []
         try:
-            # Use fetch_positions to get ALL positions at once
-            raw_positions = self._client.fetch_positions()
-            
-            # Build symbol name mapping from config, keyed on the NORMALIZED
-            # display form so it matches whatever format fetch_positions returns.
+            # fetch_positions() returns list[Position] (typed).
+            typed_positions = self._client.fetch_positions()
+
+            # Build symbol name mapping from config so tBTCUST / BTC/USDT:USDT
+            # -> the config display name (e.g. "BTC/USDT").
             symbols_config = self.trading_config.get("symbols", [])
             if not symbols_config:
                 symbols_config = [{"name": self.trading_config.get("symbol", "BTC/USDT"),
                                    "symbol": "tBTCUST"}]
 
-            # Map every known representation (tBTCUST, BTC/USDT:USDT, BTC/USDT)
-            # -> the config display name (e.g. "BTC/USDT").
             symbol_map = {}
             for sym_config in symbols_config:
                 exchange_symbol = sym_config.get("symbol", "")
@@ -929,28 +942,27 @@ class ExecutionEngine:
                     if norm:
                         symbol_map[norm] = name
 
-            # Convert positions to internal format
+            # Convert typed Position objects to the engine's internal dict shape.
             positions = []
-            for pos in raw_positions:
-                exchange_symbol = pos.get("symbol", "")
-                contracts = float(pos.get("contracts", 0))
-                if contracts == 0:
+            for p in typed_positions:
+                if p.abs_amount == 0:
                     continue
-
-                # Normalize the exchange symbol to the unified display form so
-                # downstream SL/TP + close lookups (keyed "BTC/USDT") match.
-                norm = self._normalize_symbol(exchange_symbol)
-                display_name = symbol_map.get(norm, norm or exchange_symbol)
-                side = "buy" if pos.get("side") == "long" else "sell"
-                
+                # Typed Position already carries display-form symbol; map via
+                # config table so the display name matches the config key.
+                norm = self._normalize_symbol(p.symbol)
+                display_name = symbol_map.get(norm, norm or p.symbol)
+                side = "buy" if p.side == "long" else "sell"
                 positions.append({
                     "symbol": display_name,
                     "side": side,
-                    "amount": contracts,
-                    "entry_price": float(pos.get("entryPrice", 0)),
-                    "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
+                    "contracts": p.abs_amount,
+                    "amount": p.abs_amount,
+                    "entryPrice": p.entry_price,
+                    "entry_price": p.entry_price,
+                    "unrealizedPnl": p.unrealized_pnl,
+                    "unrealized_pnl": p.unrealized_pnl,
                 })
-            
+
             return positions
         except Exception as exc:
             self._log.error("Failed to fetch live positions: %s", exc)
@@ -1106,18 +1118,19 @@ class ExecutionEngine:
                 # symbol straight through — the client converts it internally.
                 self._enforce_rate_limit()
 
-                result = self._client.create_order(
-                    symbol,
-                    "market",
-                    close_side,
-                    amount,
-                    None,                       # price (None for market orders)
-                    params={"reduceOnly": True},
-                )
+                from bitfinex.errors import OrderRejected, AckUnparseable
+                try:
+                    order = self._client.create_order(
+                        symbol, close_side, amount,
+                        order_type="market", price=None, reduce_only=True)
+                except (OrderRejected, AckUnparseable) as exc:
+                    self._log.error("Failed to close position: %s", exc)
+                    return {"success": False, "pnl": 0.0, "price": 0.0,
+                            "error": str(exc)}
 
-                if result.get("success"):
+                if order.is_filled:
                     # Prefer the actual fill price (average), else fall back.
-                    close_price = result.get("average")
+                    close_price = order.avg_price
                     if close_price in (None, 0, 0.0):
                         close_price = self._current_price(symbol, entry_price)
                     close_price = float(close_price)
@@ -1133,8 +1146,8 @@ class ExecutionEngine:
                         amount=amount, entry_price=entry_price,
                         close_price=close_price, pnl=pnl, reason=reason,
                         opened_at=position.get("timestamp"),
-                        exchange_order_id=str(result.get("order_id") or "")
-                        or None)
+                        exchange_order_id=str(order.id) if order.id is not None
+                        else None)
 
                     # Journal the trade and clear local SL/TP metadata so the
                     # closed position is no longer tracked.
@@ -1151,7 +1164,7 @@ class ExecutionEngine:
                             "price": close_price, "error": None}
                 else:
                     # Failure: do NOT record a trade and do NOT delete meta.
-                    error = result.get("error", "Unknown error")
+                    error = order.status or "Unknown error"
                     self._log.error(f"Failed to close position: {error}")
                     return {"success": False, "pnl": 0.0, "price": 0.0,
                             "error": error}
@@ -1169,14 +1182,12 @@ class ExecutionEngine:
         """
         if self._client is not None:
             try:
-                ticker = self._client.fetch_ticker(symbol)
-                last = ticker.get("last") or ticker.get("close")
-                if last:
-                    return float(last)
-                bid = ticker.get("bid")
-                ask = ticker.get("ask")
-                if bid and ask:
-                    return (float(bid) + float(ask)) / 2.0
+                t = self._client.fetch_ticker(symbol)
+                # Typed Ticker: access attributes directly.
+                if t.last:
+                    return float(t.last)
+                if t.bid and t.ask:
+                    return (t.bid + t.ask) / 2.0
             except Exception as exc:
                 self._log.warning("Could not fetch current price for %s: %s", symbol, exc)
         return float(fallback)

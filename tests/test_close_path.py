@@ -3,8 +3,8 @@ Unit tests for the position-close path (real-money critical bug fixes).
 
 Covers:
   (a) a successful close returns success=True, records a trade, and clears meta
-  (b) closing passes reduceOnly=True through to create_order
-  (c) BitfinexClient.create_order's normalized success contract
+  (b) closing passes reduce_only=True through to create_order
+  (c) BitfinexClient (typed) create_order paper-mode contract
   (d) symbol normalization to the unified display form
 
 These tests use paper mode and a stubbed client so no network / real keys
@@ -17,7 +17,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from execution.engine import ExecutionEngine
-from market_data.bitfinex_client import BitfinexClient
+from bitfinex import BitfinexClient
+from bitfinex.models import Order, Position, Ticker
+from bitfinex.errors import OrderRejected
 
 
 # ---------------------------------------------------------------------------
@@ -34,30 +36,42 @@ def _paper_config(tmp_path):
 
 
 class _StubClient:
-    """Records create_order calls and returns the normalized success contract."""
+    """Typed stub: returns typed models matching bitfinex.BitfinexClient."""
 
     def __init__(self, average=105.0):
         self.calls = []
         self.average = average
+        self.mode = "live"
 
-    def create_order(self, symbol, order_type, side, amount, price=None, params=None):
+    def create_order(self, symbol, side, amount, *, order_type="market",
+                     price=None, reduce_only=False):
         self.calls.append({
-            "symbol": symbol, "order_type": order_type, "side": side,
-            "amount": amount, "price": price, "params": params or {},
+            "symbol": symbol, "side": side, "amount": amount,
+            "order_type": order_type, "price": price,
+            "reduce_only": reduce_only,
         })
-        return {
-            "success": True,
-            "id": "stub-1",
-            "filled": amount,
-            "average": self.average,
-            "status": "closed",
-            "symbol": symbol,
-            "error": None,
-            "raw": {},
-        }
+        return Order(id=1234, symbol=symbol, side=side, order_type=order_type,
+                     amount=amount, filled=amount, avg_price=self.average,
+                     status="EXECUTED", reduce_only=reduce_only, fee=0.0,
+                     fee_currency=None, raw=None)
+
+    def close_position(self, symbol):
+        return self.create_order(symbol, "sell", 0.3, reduce_only=True)
 
     def fetch_ticker(self, symbol):
-        return {"last": self.average, "bid": self.average, "ask": self.average}
+        return Ticker(symbol=symbol, bid=self.average, ask=self.average,
+                      last=self.average)
+
+    def fetch_positions(self):
+        return [Position(symbol="BTC/USDT", side="long", amount=0.3,
+                         entry_price=100.0, unrealized_pnl=1.0, leverage=2.0,
+                         raw_symbol="tBTCUST")]
+
+    def fetch_position(self, symbol):
+        for p in self.fetch_positions():
+            if p.symbol == symbol:
+                return p
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +109,7 @@ def test_paper_close_success_records_trade_and_clears_meta(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-#  (b) live close passes reduceOnly=True to create_order
+#  (b) live close passes reduce_only=True to create_order
 # ---------------------------------------------------------------------------
 
 def test_live_close_passes_reduce_only(tmp_path):
@@ -120,8 +134,8 @@ def test_live_close_passes_reduce_only(tmp_path):
     assert close["error"] is None
     assert len(stub.calls) == 1
     call = stub.calls[0]
-    # reduceOnly must be forwarded so the close does not open an opposing pos
-    assert call["params"].get("reduceOnly") is True
+    # reduce_only must be True so the close does not open an opposing pos
+    assert call["reduce_only"] is True
     # close side is opposite of the long entry
     assert call["side"] == "sell"
     # unified symbol passed straight through (no t-format surgery)
@@ -137,13 +151,15 @@ def test_live_close_failure_does_not_record_or_clear(tmp_path):
     eng.mode = "live"
 
     class _FailClient(_StubClient):
-        def create_order(self, *a, **k):
-            super().create_order(*a, **k)
-            return {
-                "success": False, "id": None, "filled": 0.0, "average": None,
-                "status": "rejected", "symbol": a[0],
-                "error": "not enough tradable balance", "raw": None,
-            }
+        def create_order(self, symbol, side, amount, *, order_type="market",
+                         price=None, reduce_only=False):
+            # Record the call then raise OrderRejected
+            self.calls.append({
+                "symbol": symbol, "side": side, "amount": amount,
+                "order_type": order_type, "price": price,
+                "reduce_only": reduce_only,
+            })
+            raise OrderRejected("not enough tradable balance")
 
     eng._client = _FailClient()
     eng._open_positions = [{
@@ -162,7 +178,7 @@ def test_live_close_failure_does_not_record_or_clear(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-#  (c) create_order normalized success contract (paper mode, no network)
+#  (c) create_order paper-mode contract (typed return)
 # ---------------------------------------------------------------------------
 
 def test_create_order_normalized_contract_paper():
@@ -172,24 +188,26 @@ def test_create_order_normalized_contract_paper():
     }
     client = BitfinexClient(cfg, mode="paper")
 
-    result = client.create_order("BTC/USDT", "market", "buy", 0.01)
+    order = client.create_order("BTC/USDT", "buy", 0.01, price=100.0)
 
-    for key in ("success", "id", "filled", "average", "status", "symbol", "error", "raw"):
-        assert key in result, f"missing key {key}"
-    assert result["success"] is True
-    assert result["error"] is None
-    assert isinstance(result["filled"], float)
-    assert result["filled"] == 0.01
+    assert isinstance(order, Order)
+    assert order.is_filled is True
+    assert order.id is not None
+    assert isinstance(order.filled, float)
+    assert order.filled == 0.01
+    assert order.symbol == "BTC/USDT"
+    assert order.side == "buy"
 
 
-def test_create_order_error_contract_is_normalized():
+def test_create_order_paper_reduce_only():
     cfg = {"trading": {"initial_capital": 100.0}, "exchange": {"rate_limit": 0.0}}
     client = BitfinexClient(cfg, mode="paper")
-    err = client._error_order_result("boom", "BTC/USDT")
-    assert err["success"] is False
-    assert err["error"] == "boom"
-    assert err["id"] is None
-    assert err["filled"] == 0.0
+
+    order = client.create_order("BTC/USDT", "sell", 0.01, price=100.0,
+                                reduce_only=True)
+    assert isinstance(order, Order)
+    assert order.reduce_only is True
+    assert order.is_filled is True
 
 
 def test_client_close_position_uses_reduce_only(monkeypatch):
@@ -198,24 +216,27 @@ def test_client_close_position_uses_reduce_only(monkeypatch):
 
     captured = {}
 
-    def fake_create_order(symbol, order_type, side, amount, price=None, params=None):
-        captured.update({"symbol": symbol, "side": side, "params": params})
-        return client._normalize_order_result({"id": "x", "filled": amount}, symbol)
+    def fake_submit_order(symbol, side, amount, *, order_type="market",
+                          price=None, reduce_only=False):
+        captured.update({"symbol": symbol, "side": side,
+                         "reduce_only": reduce_only})
+        return Order(id=1, symbol=symbol, side=side, order_type=order_type,
+                     amount=amount, filled=amount, avg_price=price or 0.0,
+                     status="EXECUTED", reduce_only=reduce_only, fee=0.0,
+                     fee_currency=None, raw=None)
 
-    # Simulate an open long paper position.
-    client._paper_positions["BTC/USDT"] = {
-        "symbol": "BTC/USDT", "contracts": 0.5, "side": "long", "entryPrice": 100.0,
-    }
-    # Force the non-paper branch path by stubbing fetch_position + create_order.
-    client.mode = "live"
-    monkeypatch.setattr(client, "fetch_position", lambda s: {
-        "symbol": s, "contracts": 0.5, "side": "long",
-    })
-    monkeypatch.setattr(client, "create_order", fake_create_order)
+    # close_position fetches position + ticker then calls self._auth.submit_order
+    from bitfinex.models import Position
+    monkeypatch.setattr(client, "fetch_position", lambda s: Position(
+        symbol=s, side="long", amount=0.5, entry_price=100.0,
+        unrealized_pnl=0.0, leverage=1.0, raw_symbol="tBTCUST"))
+    monkeypatch.setattr(client, "fetch_ticker", lambda s: Ticker(
+        symbol=s, bid=100.0, ask=100.0, last=100.0))
+    monkeypatch.setattr(client._auth, "submit_order", fake_submit_order)
 
-    res = client.close_position("BTC/USDT")
-    assert res["success"] is True
-    assert captured["params"].get("reduceOnly") is True
+    result = client.close_position("BTC/USDT")
+    assert isinstance(result, Order)
+    assert captured["reduce_only"] is True
     assert captured["side"] == "sell"
 
 
@@ -237,13 +258,12 @@ def test_get_live_positions_maps_unified_symbol(tmp_path):
     cfg["trading"]["symbols"] = [{"name": "BTC/USDT", "symbol": "tBTCUST", "enabled": True}]
     eng = ExecutionEngine(cfg, mode="paper", trade_direction="both")
 
-    # fetch_positions returns CCXT unified derivative symbols.
+    # fetch_positions returns typed Position objects (new BitfinexClient).
     class _PosClient:
         def fetch_positions(self):
-            return [{
-                "symbol": "BTC/USDT:USDT", "contracts": 0.3, "side": "long",
-                "entryPrice": 100.0, "unrealizedPnl": 1.0,
-            }]
+            return [Position(symbol="BTC/USDT", side="long", amount=0.3,
+                             entry_price=100.0, unrealized_pnl=1.0,
+                             leverage=2.0, raw_symbol="tBTCUST")]
 
     eng._client = _PosClient()
     positions = eng._get_live_positions()
