@@ -102,6 +102,10 @@ def main():
     ap.add_argument("--config", default="config/default.yaml")
     ap.add_argument("--arm", action="store_true",
                     help="Actually place orders. Without this, preflight only.")
+    ap.add_argument("--require-ws", action="store_true",
+                    help="Wait for the WS feed to be healthy before proceeding, "
+                         "so orders route over WebSocket (Phase-3 gate). Aborts "
+                         "if the feed does not authenticate in time.")
     args = ap.parse_args()
 
     if not os.environ.get("BITFINEX_API_KEY") or not os.environ.get("BITFINEX_API_SECRET"):
@@ -113,6 +117,24 @@ def main():
     cfg = load_config(args.config)
     engine = ExecutionEngine(cfg, mode="live", trade_direction="both")
     client = engine._client
+
+    if args.require_ws:
+        banner("WAIT FOR WS FEED (orders will route over WebSocket)")
+        feed = getattr(client, "_feed", None)
+        if feed is None:
+            sys.exit("ABORT: --require-ws but no WS feed (is exchange.ws.enabled "
+                     "true and mode live?).")
+        deadline = time.time() + 20
+        while time.time() < deadline and not feed.is_healthy():
+            time.sleep(0.5)
+        acct = getattr(client, "_account", None)
+        print(f"  feed.is_healthy()={feed.is_healthy()} "
+              f"connected={getattr(acct, 'connected', '?')} "
+              f"authenticated={getattr(acct, 'authenticated', '?')}")
+        if not feed.is_healthy():
+            sys.exit("ABORT: WS feed did not become healthy within 20s — would "
+                     "fall back to REST, not testing the WS path. Nothing placed.")
+        print("  WS feed healthy — orders will route over WebSocket.")
 
     banner(f"PREFLIGHT (read-only) — {symbol}  side={args.side}  notional=${args.notional}")
 
@@ -156,11 +178,12 @@ def main():
     try:
         # ---- 1. OPEN (no reduce_only: this genuinely opens the position) ----
         banner(f"OPEN: {args.side} {amount:.8f} {symbol} (market, margin)")
+        # Arm the safety net BEFORE sending — a WS submit can raise AckUnparseable
+        # with the order possibly already on the exchange. The finally block then
+        # always verifies positions and force-flattens.
+        opened = True
         open_order = client.create_order(symbol, args.side, amount,
                                          order_type="market", reduce_only=False)
-        # The order was SENT. Arm the safety net IMMEDIATELY so any open position
-        # is force-flattened in the finally block regardless of what follows.
-        opened = True
         print(f"  open result: is_accepted={open_order.is_accepted} "
               f"is_filled={open_order.is_filled} id={open_order.id} "
               f"filled={open_order.filled} avg={open_order.avg_price} "
