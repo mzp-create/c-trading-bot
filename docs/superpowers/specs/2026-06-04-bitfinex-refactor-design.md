@@ -1,7 +1,7 @@
 # Design: Trading Architecture Refactor — Phase 2, Bitfinex Package (bfxapi)
 
 Date: 2026-06-04
-Status: Approved (design) — pending written-spec review
+Status: Implemented (Phase 2) — see docs/superpowers/plans/2026-06-04-bitfinex-refactor.md (pending live smoke-test gate)
 Branch: refactor/trading-architecture
 Predecessor: Phase 1 persistence (docs/superpowers/specs/2026-06-03-persistence-sqlite-design.md, implemented)
 
