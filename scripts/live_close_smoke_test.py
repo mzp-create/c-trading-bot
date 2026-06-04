@@ -158,12 +158,18 @@ def main():
         banner(f"OPEN: {args.side} {amount:.8f} {symbol} (market, margin)")
         open_order = client.create_order(symbol, args.side, amount,
                                          order_type="market", reduce_only=False)
-        print(f"  open result: is_filled={open_order.is_filled} id={open_order.id} "
+        # The order was SENT. Arm the safety net IMMEDIATELY so any open position
+        # is force-flattened in the finally block regardless of what follows.
+        opened = True
+        print(f"  open result: is_accepted={open_order.is_accepted} "
+              f"is_filled={open_order.is_filled} id={open_order.id} "
               f"filled={open_order.filled} avg={open_order.avg_price} "
               f"status={open_order.status}")
-        if not open_order.is_filled:
-            sys.exit(f"OPEN failed — nothing to close. status={open_order.status}")
-        opened = True
+        # A market order acked ACTIVE (real id, not rejected) WILL fill — gate on
+        # is_accepted, NOT is_filled (which requires the EXECUTED status that the
+        # immediate ack does not carry).
+        if not open_order.is_accepted:
+            sys.exit(f"OPEN rejected — nothing to close. status={open_order.status}")
         time.sleep(3)
 
         # ---- 2. CONFIRM the position exists ----
