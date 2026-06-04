@@ -21,9 +21,9 @@ SAFETY
 * Places at most TWO orders total: one open, one reduceOnly close.
 * Refuses to run if a position already exists on the test symbol (won't
   touch positions it didn't create).
-* A finally-block emergency-closes (reduceOnly) anything left open and, if
-  it still can't flatten, prints LOUD manual-close instructions. It never
-  exits silently with an open position.
+* A finally-block emergency-closes anything left open and, if it still
+  can't flatten, prints LOUD manual-close instructions. It never exits
+  silently with an open position.
 
 Usage
 -----
@@ -56,42 +56,38 @@ def banner(msg):
 
 
 def get_position_contracts(client, symbol):
-    """Return (contracts, side) for the symbol, or (0.0, None) if flat."""
+    """Return (abs_amount, side) for the symbol, or (0.0, None) if flat."""
     try:
         pos = client.fetch_position(symbol)
-        return float(pos.get("contracts", 0) or 0), pos.get("side")
+        if pos is None:
+            return 0.0, None
+        return pos.abs_amount, pos.side
     except Exception as exc:  # noqa: BLE001
         print(f"  ! fetch_position error: {exc!r}")
         return 0.0, None
 
 
 def emergency_flatten(client, symbol, attempts=3):
-    """Guaranteed flatten via a raw opposite MARKET order on the margin position.
+    """Guaranteed flatten via a typed opposite MARKET order on the margin position.
 
-    Uses the raw /auth/r/positions + /auth/w/order/submit endpoints directly
-    (proven to net/close margin positions) rather than reduceOnly, so the net
-    works even if reduceOnly is rejected. Returns True if flat afterwards.
+    Sends a reduce_only market order in the opposite direction. Returns True
+    if the position is flat afterwards.
     """
-    bfx_symbol = client._symbol_to_bitfinex(symbol)
     for i in range(1, attempts + 1):
-        try:
-            active = [p for p in client._exchange.private_post_auth_r_positions()
-                      if p[1] == "ACTIVE" and p[0] == bfx_symbol]
-        except Exception as exc:  # noqa: BLE001
-            print(f"  [safety {i}] could not read positions: {exc!r}"); time.sleep(2); continue
-        if not active:
+        contracts, side = get_position_contracts(client, symbol)
+        if contracts == 0:
             return True
-        amt = float(active[0][2])
-        print(f"  [safety {i}/{attempts}] {bfx_symbol} amount={amt}; sending opposite MARKET...")
+        close_side = "sell" if side == "long" else "buy"
+        print(f"  [safety {i}/{attempts}] {symbol} contracts={contracts} side={side}; "
+              f"sending {close_side} MARKET reduce_only...")
         try:
-            client._exchange.private_post_auth_w_order_submit(
-                {"symbol": bfx_symbol, "amount": f"{-amt:.8f}", "type": "MARKET"})
+            client.create_order(symbol, close_side, contracts,
+                                order_type="market", reduce_only=True)
         except Exception as exc:  # noqa: BLE001
             print(f"  [safety {i}] raw close raised: {exc!r}")
         time.sleep(3)
-    active = [p for p in client._exchange.private_post_auth_r_positions()
-              if p[1] == "ACTIVE" and p[0] == bfx_symbol]
-    return not active
+    contracts, _ = get_position_contracts(client, symbol)
+    return contracts == 0
 
 
 def main():
@@ -122,8 +118,8 @@ def main():
 
     # Balance
     try:
-        bal = client.fetch_balance()
-        totals = {k: v for k, v in (bal.get("total") or {}).items() if v}
+        wallets = client.fetch_balance()
+        totals = {w.currency: w.balance for w in wallets if w.balance}
         print(f"  margin wallet totals: {totals}")
     except Exception as exc:  # noqa: BLE001
         print(f"  ! fetch_balance error: {exc!r}")
@@ -138,29 +134,11 @@ def main():
 
     # Price + sizing
     ticker = client.fetch_ticker(symbol)
-    price = float(ticker.get("last") or ticker.get("close"))
+    price = float(ticker.last)
     amount = args.notional / price
 
-    # Respect the exchange minimum order size
-    ccxt_symbol = client._symbol_to_ccxt(symbol)
-    min_amt = None
-    try:
-        client._exchange.load_markets()
-        mkt = client._exchange.market(ccxt_symbol)
-        min_amt = (mkt.get("limits", {}).get("amount", {}) or {}).get("min")
-        amount = float(client._exchange.amount_to_precision(ccxt_symbol, amount))
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ! market/precision lookup failed, using raw amount: {exc!r}")
-
-    if min_amt and amount < float(min_amt):
-        amount = float(min_amt)
-        print(f"  ! notional below exchange minimum; bumping amount to min {min_amt} "
-              f"(~${amount * price:.2f} notional)")
-
-    print(f"  ccxt market : {ccxt_symbol}")
     print(f"  price       : {price}")
-    print(f"  min amount  : {min_amt}")
-    print(f"  PLAN        : open {args.side} {amount} {symbol} (~${amount * price:.2f}), "
+    print(f"  PLAN        : open {args.side} {amount:.8f} {symbol} (~${amount * price:.2f}), "
           f"then reduceOnly close")
 
     if not args.arm:
@@ -168,23 +146,23 @@ def main():
         return 0
 
     # ---- arm gate: typed confirmation ----
-    print(f"\n  ⚠️  LIVE ORDERS on a real margin account.")
+    print(f"\n  WARNING: LIVE ORDERS on a real margin account.")
     phrase = f"close {symbol}"
-    typed = input(f'  Type exactly  «{phrase}»  to proceed: ').strip()
+    typed = input(f'  Type exactly  [{phrase}]  to proceed: ').strip()
     if typed != phrase:
         sys.exit("Confirmation mismatch — aborted, nothing placed.")
 
     opened = False
     try:
-        # ---- 1. OPEN (no reduceOnly: this genuinely opens the position) ----
-        banner(f"OPEN: {args.side} {amount} {symbol} (market, margin)")
-        open_res = client.create_order(symbol, "market", args.side, amount, None,
-                                       params={"marginMode": "margin"})
-        print(f"  open result: success={open_res.get('success')} id={open_res.get('id')} "
-              f"filled={open_res.get('filled')} avg={open_res.get('average')} "
-              f"status={open_res.get('status')} error={open_res.get('error')}")
-        if not open_res.get("success"):
-            sys.exit(f"OPEN failed — nothing to close. error={open_res.get('error')}")
+        # ---- 1. OPEN (no reduce_only: this genuinely opens the position) ----
+        banner(f"OPEN: {args.side} {amount:.8f} {symbol} (market, margin)")
+        open_order = client.create_order(symbol, args.side, amount,
+                                         order_type="market", reduce_only=False)
+        print(f"  open result: is_filled={open_order.is_filled} id={open_order.id} "
+              f"filled={open_order.filled} avg={open_order.avg_price} "
+              f"status={open_order.status}")
+        if not open_order.is_filled:
+            sys.exit(f"OPEN failed — nothing to close. status={open_order.status}")
         opened = True
         time.sleep(3)
 
@@ -193,12 +171,12 @@ def main():
         contracts, side = get_position_contracts(client, symbol)
         print(f"  fetch_position: side={side} contracts={contracts}")
         if contracts == 0:
-            print("  ! position not visible yet; proceeding to close anyway (reduceOnly is safe)")
+            print("  ! position not visible yet; proceeding to close anyway (reduce_only is safe)")
 
         # ---- 3. CLOSE via the PRODUCTION path (engine -> reduceOnly) ----
         banner("CLOSE via ExecutionEngine.close_position() — reduceOnly")
         close_res = engine.close_position(symbol, reason="smoke_test")
-        print(f"  engine close contract: {close_res}")
+        print(f"  engine close result: {close_res}")
         ok = bool(close_res.get("success"))
         print(f"  -> success={ok} pnl={close_res.get('pnl')} price={close_res.get('price')} "
               f"error={close_res.get('error')}")
@@ -216,7 +194,7 @@ def main():
         except Exception as exc:  # noqa: BLE001
             print(f"  ! could not read trades.csv: {exc!r}")
 
-        verdict = "PASS ✅" if (ok and flat) else "FAIL ❌"
+        verdict = "PASS" if (ok and flat) else "FAIL"
         print(f"\n  SMOKE TEST: {verdict}")
         return 0 if (ok and flat) else 1
 
@@ -231,7 +209,7 @@ def main():
                     print(f"  COULD NOT FLATTEN {symbol}. CLOSE IT MANUALLY NOW:")
                     print(f"    - Bitfinex app/website  OR")
                     print(f"    - python close_positions.py   OR")
-                    print(f"    - client.close_position('{symbol}')  (reduceOnly)")
+                    print(f"    - client.close_position('{symbol}')  (reduce_only)")
                     print("!" * 64)
 
 

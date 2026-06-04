@@ -17,10 +17,11 @@ print("✅ Config loaded")
 
 # Test each module
 try:
-    from market_data.bitfinex_client import BitfinexClient, PaperBitfinexClient, create_bitfinex_client
-    print("✅ market_data.bitfinex_client — OK")
+    from bitfinex import BitfinexClient
+    from bitfinex.models import Order, Position, Ticker, Wallet, Fill
+    print("✅ bitfinex (typed client package) — OK")
 except Exception as e:
-    print(f"❌ market_data.bitfinex_client — {e}")
+    print(f"❌ bitfinex — {e}")
 
 try:
     from market_data.collector import MarketDataCollector

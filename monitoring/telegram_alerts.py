@@ -516,9 +516,9 @@ class TelegramNotifier:
     @staticmethod
     def _cmd_balance(_args: str, bot: "TradingBot") -> str:  # noqa: F821
         try:
-            raw = bot.collector.client.fetch_balance()
-            free = raw.get("free", {})
-            total = raw.get("total", {})
+            wallets = bot.collector.client.fetch_balance()
+            total = {w.currency: w.balance for w in wallets}
+            free = {w.currency: w.available for w in wallets}
             lines = ["💰 **Wallet Balance (Margin)**"]
             for cur in ["USDT", "BTC", "ETH", "SOL"]:
                 t = float(total.get(cur, 0))
@@ -535,10 +535,10 @@ class TelegramNotifier:
         """Show comprehensive portfolio summary."""
         try:
             # Fetch balance
-            balance = bot.collector.client.fetch_balance()
-            free = balance.get("free", {})
-            used = balance.get("used", {})
-            total = balance.get("total", {})
+            _wallets = bot.collector.client.fetch_balance()
+            total = {w.currency: w.balance for w in _wallets}
+            free = {w.currency: w.available for w in _wallets}
+            used = {w.currency: w.balance - w.available for w in _wallets}
 
             # Get current market prices for valuation
             prices = {}

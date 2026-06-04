@@ -19,7 +19,7 @@ with open('.env', 'r') as f:
             env_vars[key] = val
             os.environ[key] = val
 
-from market_data.bitfinex_client import BitfinexClient
+from bitfinex import BitfinexClient
 
 config = {
     'exchange': {
@@ -27,7 +27,6 @@ config = {
         'api_secret': os.getenv('BITFINEX_API_SECRET'),
         'testnet': False,
         'default_type': 'margin',
-        'nonce_file': 'data/.bfx_nonce_shared'
     },
     'data': {
         'ohlcv_dir': 'data/ohlcv'
@@ -37,7 +36,7 @@ config = {
     }
 }
 
-client = BitfinexClient(config, mode='live')
+client = BitfinexClient(config, mode='live', instance='close')
 
 print("=" * 50)
 print("CLOSING OPEN POSITIONS")
@@ -47,42 +46,38 @@ print("=" * 50)
 positions = client.fetch_positions()
 print(f"\nFound {len(positions)} open position(s)")
 
-for pos in positions:
-    symbol = pos.get('symbol')
-    side = pos.get('side')
-    amount = pos.get('amount', 0)
-    
-    print(f"\n{symbol}: {side} {abs(amount)}")
-    
+for p in positions:
+    print(f"\n{p.symbol}: {p.side} {p.abs_amount}")
+
     # Determine close side (opposite of position)
-    close_side = "buy" if side == "short" else "sell"
-    
-    # Get current price
+    close_side = "sell" if p.side == "long" else "buy"
+
+    # Get current price for informational display
     try:
-        ticker = client._exchange.fetch_ticker(symbol)
-        current_price = ticker['last']
+        current_price = client.fetch_ticker(p.symbol).last
         print(f"  Current price: ${current_price}")
-        
-        # Close position — reduceOnly so Bitfinex closes rather than opening
-        # an opposing position. Symbol from fetch_positions() is already the
-        # unified CCXT form (e.g. "BTC/USDT") the client expects.
+    except Exception as e:
+        print(f"  ! Could not fetch ticker: {e}")
+
+    # Close position — reduce_only so Bitfinex closes rather than opening
+    # an opposing position.
+    try:
         print(f"  Closing with {close_side} order...")
-        result = client.create_order(
-            symbol,
-            "market",
+        order = client.create_order(
+            p.symbol,
             close_side,
-            abs(amount),
-            None,
-            {"reduceOnly": True},
+            p.abs_amount,
+            order_type="market",
+            reduce_only=True,
         )
 
-        if result["success"]:
-            print(f"  ✅ CLOSED - Order ID: {result['id']}")
+        if order.is_filled:
+            print(f"  CLOSED - Order ID: {order.id}")
         else:
-            print(f"  ❌ FAILED: {result['error']}")
-            
+            print(f"  FAILED: {order.status}")
+
     except Exception as e:
-        print(f"  ❌ ERROR: {e}")
+        print(f"  ERROR: {e}")
 
 print("\n" + "=" * 50)
 print("Done!")
