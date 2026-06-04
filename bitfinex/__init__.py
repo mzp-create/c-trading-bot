@@ -6,5 +6,6 @@ simulates. See docs/superpowers/specs/2026-06-04-bitfinex-refactor-design.md.
 """
 
 from bitfinex.models import Order, Position, Ticker, Wallet, Fill
+from bitfinex.client import BitfinexClient
 
-__all__ = ["Order", "Position", "Ticker", "Wallet", "Fill"]
+__all__ = ["BitfinexClient", "Order", "Position", "Ticker", "Wallet", "Fill"]
