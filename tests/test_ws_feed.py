@@ -71,3 +71,19 @@ def test_status_and_health():
     assert feed.is_healthy() is True
     feed._on_disconnected()
     assert feed.is_healthy() is False
+
+
+def test_reconcile_pulls_positions_and_wallets_from_rest():
+    from bitfinex.models import Position, Wallet
+    ms, acc = MarketState(), AccountState()
+    rest = types.SimpleNamespace(
+        get_positions=lambda: [Position(symbol="BTC/USDT", side="long",
+            amount=0.5, entry_price=100.0, unrealized_pnl=1.0, leverage=2.0,
+            raw_symbol="tBTCUST")],
+        get_wallets=lambda: [Wallet(currency="USDT", wallet_type="margin",
+            balance=538.0, available=500.0)])
+    feed = WsFeed("k", "s", ["BTC/USDT"], ms, acc, rest)
+    feed._reconcile()
+    assert acc.get_position("BTC/USDT").amount == 0.5
+    assert acc.get_wallets()[0].balance == 538.0
+    assert acc.last_reconcile is not None

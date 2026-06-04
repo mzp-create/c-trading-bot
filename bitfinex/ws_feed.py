@@ -10,7 +10,6 @@ import asyncio
 import itertools
 import logging
 import threading
-import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -53,7 +52,6 @@ class WsFeed:
         self._cid = itertools.count(1)
         self._pending: dict[int, tuple] = {}    # cid -> (Event, holder)
         self._pending_lock = threading.Lock()
-        self._auth_count = 0
 
     # ── mapping ──────────────────────────────────────────────────────────
     def _pos(self, p) -> Position:
@@ -95,10 +93,10 @@ class WsFeed:
                                  authenticated=self._account.authenticated)
 
     def _on_authenticated(self, data=None):
-        self._auth_count += 1
+        # bfxapi fires `authenticated` only once per Client lifetime (gated by
+        # _ONCE_PER_CONNECTION, never reset across reconnects), so we cannot use
+        # it as a reconnect signal. Reconnect recovery is the periodic reconcile.
         self._account.set_status(connected=True, authenticated=True)
-        if self._auth_count > 1:        # reconnect: snapshot won't refire
-            self._reconcile()
 
     def _on_disconnected(self, *a):
         self._account.set_status(connected=False, authenticated=False)
@@ -160,11 +158,26 @@ class WsFeed:
             self._bfx = Client(**kwargs)
         self._register_handlers()
         try:
-            loop.run_until_complete(self._bfx.wss.start())
+            loop.run_until_complete(self._main())
         except Exception as exc:                # never crash the process
             log.error("WS feed loop exited: %s", exc)
         finally:
             loop.close()
+
+    async def _main(self):
+        recon = asyncio.create_task(self._reconcile_loop())
+        try:
+            await self._bfx.wss.start()
+        finally:
+            recon.cancel()
+
+    async def _reconcile_loop(self):
+        """Periodic REST reconcile — the reconnect-recovery mechanism, since
+        bfxapi does not re-emit auth/snapshot events after a reconnect."""
+        while True:
+            await asyncio.sleep(self._reconcile_interval)
+            if self._account.authenticated:
+                self._reconcile()
 
     def _register_handlers(self):
         wss = self._bfx.wss
@@ -173,7 +186,10 @@ class WsFeed:
         async def _open():
             self._safe(self._on_open)
             for s in self._symbols:
-                await wss.subscribe("ticker", symbol=symbols.to_bitfinex(s))
+                try:
+                    await wss.subscribe("ticker", symbol=symbols.to_bitfinex(s))
+                except Exception as exc:
+                    log.error("ticker subscribe failed for %s: %s", s, exc)
 
         wss.on("authenticated", lambda data=None: self._safe(self._on_authenticated, data))
         wss.on("disconnected", lambda *a: self._safe(self._on_disconnected))
