@@ -85,8 +85,10 @@ def test_paper_close_success_records_trade_and_clears_meta(tmp_path):
     res = eng.execute_order("BTC/USDT", "buy", 0.1, 100.0, "market")
     assert res["success"] is True
 
-    # Seed SL/TP meta to prove it gets cleared on close.
-    eng._live_position_meta["BTC/USDT"] = {"stop_loss": 98.0}
+    # Seed SL/TP meta via RiskState to prove it gets cleared on close.
+    eng._risk_state.set("BTC/USDT", stop_loss=98.0, take_profit=0.0,
+                        trailing_stop=False, trailing_activation=2.0,
+                        trailing_distance=0.5, entry_price=100.0, side="buy")
 
     # Stub a client so paper close prices off a known ticker.
     eng._client = _StubClient(average=110.0)
@@ -101,9 +103,9 @@ def test_paper_close_success_records_trade_and_clears_meta(tmp_path):
     # trade journaled
     assert len(eng._trade_history) == 1
     assert eng._trade_history[-1]["symbol"] == "BTC/USDT"
-    # meta cleared, position gone
-    assert "BTC/USDT" not in eng._live_position_meta
-    assert all(p.get("symbol") != "BTC/USDT" for p in eng._open_positions)
+    # RiskState cleared, position gone from open_positions
+    assert eng._risk_state.get("BTC/USDT") is None
+    assert "BTC/USDT" not in eng._risk_entry
     # Trade persisted to the database (CSV write was dropped in favour of SQLite)
     assert len(eng._repo.recent_trades(limit=1)) == 1
 
@@ -121,12 +123,14 @@ def test_live_close_passes_reduce_only(tmp_path):
     stub = _StubClient(average=95.0)
     eng._client = stub
 
-    # Inject a tracked long position (as live sync would).
-    eng._open_positions = [{
+    # Inject a tracked long position via RiskState (as live sync would).
+    eng._risk_entry["BTC/USDT"] = {
         "symbol": "BTC/USDT", "side": "buy", "amount": 0.2,
-        "entry_price": 100.0,
-    }]
-    eng._live_position_meta["BTC/USDT"] = {"stop_loss": 98.0}
+        "entry_price": 100.0, "unrealized_pnl": 0.0,
+    }
+    eng._risk_state.set("BTC/USDT", stop_loss=98.0, take_profit=0.0,
+                        trailing_stop=False, trailing_activation=2.0,
+                        trailing_distance=0.5, entry_price=100.0, side="buy")
 
     close = eng.close_position("BTC/USDT", reason="stop_loss")
 
@@ -140,9 +144,9 @@ def test_live_close_passes_reduce_only(tmp_path):
     assert call["side"] == "sell"
     # unified symbol passed straight through (no t-format surgery)
     assert call["symbol"] == "BTC/USDT"
-    # journaled + meta cleared on success
+    # journaled + RiskState cleared on success
     assert len(eng._trade_history) == 1
-    assert "BTC/USDT" not in eng._live_position_meta
+    assert eng._risk_state.get("BTC/USDT") is None
 
 
 def test_live_close_failure_does_not_record_or_clear(tmp_path):
@@ -162,19 +166,22 @@ def test_live_close_failure_does_not_record_or_clear(tmp_path):
             raise OrderRejected("not enough tradable balance")
 
     eng._client = _FailClient()
-    eng._open_positions = [{
-        "symbol": "BTC/USDT", "side": "buy", "amount": 0.2, "entry_price": 100.0,
-    }]
-    eng._live_position_meta["BTC/USDT"] = {"stop_loss": 98.0}
+    eng._risk_entry["BTC/USDT"] = {
+        "symbol": "BTC/USDT", "side": "buy", "amount": 0.2,
+        "entry_price": 100.0, "unrealized_pnl": 0.0,
+    }
+    eng._risk_state.set("BTC/USDT", stop_loss=98.0, take_profit=0.0,
+                        trailing_stop=False, trailing_activation=2.0,
+                        trailing_distance=0.5, entry_price=100.0, side="buy")
 
     close = eng.close_position("BTC/USDT", reason="manual")
 
     assert close["success"] is False
     assert close["error"] == "not enough tradable balance"
     assert close["pnl"] == 0.0
-    # On failure: NOT recorded, meta retained
+    # On failure: NOT recorded, RiskState retained
     assert len(eng._trade_history) == 0
-    assert "BTC/USDT" in eng._live_position_meta
+    assert eng._risk_state.get("BTC/USDT") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +260,7 @@ def test_symbol_normalization():
     assert norm("ETH/USD:USD") == "ETH/USD"
 
 
-def test_get_live_positions_maps_unified_symbol(tmp_path):
+def test_open_positions_maps_unified_symbol(tmp_path):
     cfg = _paper_config(tmp_path)
     cfg["trading"]["symbols"] = [{"name": "BTC/USDT", "symbol": "tBTCUST", "enabled": True}]
     eng = ExecutionEngine(cfg, mode="paper", trade_direction="both")
@@ -266,7 +273,7 @@ def test_get_live_positions_maps_unified_symbol(tmp_path):
                              leverage=2.0, raw_symbol="tBTCUST")]
 
     eng._client = _PosClient()
-    positions = eng._get_live_positions()
+    positions = eng.open_positions
     assert len(positions) == 1
     # Must map to the config display name, NOT the raw derivative symbol.
     assert positions[0]["symbol"] == "BTC/USDT"

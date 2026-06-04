@@ -673,8 +673,6 @@ class TradingBot:
                 self._check_daily_reset()
 
                 # Trade cycle for EACH symbol
-                # Refresh position cache once per cycle before anything reads it
-                self.executor._update_position_cache()
                 cycle_results = []
                 for s in self.symbols:
                     result = self.execute_trade_cycle(symbol_config=s)
@@ -764,57 +762,42 @@ class TradingBot:
                     short_name = symbol.split('/')[0]
                     side_emoji = "🟢" if side == "BUY" else "🔴"
 
-                    if self.mode == "live":
-                        # Live mode: close on exchange FIRST. Only book PnL and
-                        # notify if the exchange confirms the close. On failure the
-                        # position stays on the exchange and is retried next cycle
-                        # (avoids daily_pnl double-counting from re-detection).
-                        close_result = self.executor.close_position(
-                            symbol, reason=reason
+                    # Close on exchange (paper or live): use realized PnL from the
+                    # close order.  Executor clears RiskState on success.
+                    close_result = self.executor.close_position(
+                        symbol, reason=reason
+                    )
+                    if not close_result.get('success'):
+                        self.log.error(
+                            f"[{symbol}] Failed to close position: "
+                            f"{close_result.get('error')} — will retry next cycle"
                         )
-                        if not close_result.get('success'):
-                            self.log.error(
-                                f"[{symbol}] Failed to close position on exchange: "
-                                f"{close_result.get('error')} — will retry next cycle"
-                            )
-                            # Do NOT touch daily_pnl, do NOT send a closed message,
-                            # and leave tracking intact so it is retried.
-                            continue
+                        # Do NOT touch daily_pnl, do NOT send a closed message,
+                        # and leave tracking intact so it is retried.
+                        continue
 
-                        # Use REALIZED pnl from the exchange close, not the estimate.
-                        pnl = float(close_result.get('pnl', 0.0))
-                        self.daily_pnl += pnl
-                        self.consecutive_losses = self.consecutive_losses + 1 if pnl < 0 else 0
+                    # Use REALIZED pnl from the close order.
+                    pnl = float(close_result.get('pnl', 0.0))
+                    self.daily_pnl += pnl
+                    self.consecutive_losses = self.consecutive_losses + 1 if pnl < 0 else 0
 
-                        emoji = "🟢" if pnl > 0 else "🔴"
-                        msg = (f"{emoji} **Position Closed**\n"
-                               f"{side_emoji} {short_name} {side}\n"
-                               f"PnL: ${pnl:+.2f}\n"
-                               f"Reason: {reason}\n"
-                               f"Daily PnL: ${self.daily_pnl:+.2f}")
-                        self.telegram.send(msg)
-                        self.log.info(f"[{symbol}] Position closed: {close_result}")
-                        # Executor owns removing the position from tracking.
-                    else:
-                        # Paper mode: update_position closing is authoritative.
-                        pnl = updated.get('pnl', 0.0)
-                        self.daily_pnl += pnl
-                        self.consecutive_losses = self.consecutive_losses + 1 if pnl < 0 else 0
-
-                        emoji = "🟢" if pnl > 0 else "🔴"
-                        msg = (f"{emoji} **Position Closed**\n"
-                               f"{side_emoji} {short_name} {side}\n"
-                               f"PnL: ${pnl:+.2f}\n"
-                               f"Reason: {reason}\n"
-                               f"Daily PnL: ${self.daily_pnl:+.2f}")
-                        self.telegram.send(msg)
-                        self.log.info(f"[{symbol}] Position closed: {updated}")
-
-                        # Paper mode: just remove from list
-                        try:
-                            self.executor._open_positions.remove(pos)
-                        except (ValueError, AttributeError):
-                            self.log.warning(f"[{symbol}] Position already removed from list")
+                    emoji = "🟢" if pnl > 0 else "🔴"
+                    msg = (f"{emoji} **Position Closed**\n"
+                           f"{side_emoji} {short_name} {side}\n"
+                           f"PnL: ${pnl:+.2f}\n"
+                           f"Reason: {reason}\n"
+                           f"Daily PnL: ${self.daily_pnl:+.2f}")
+                    self.telegram.send(msg)
+                    self.log.info(f"[{symbol}] Position closed: {close_result}")
+                    # Executor owns removing the position from tracking.
+                else:
+                    # Position stays open — write back any trailing stop update.
+                    # update_position mutates pos["stop_loss"] in-place but pos is
+                    # a transient copy; persist the new value to RiskState.
+                    new_sl = pos.get("stop_loss")
+                    if updated.get("updated_stop") is not None and new_sl is not None:
+                        self.executor._risk_state.update_trailing(
+                            symbol, stop_loss=new_sl)
 
         # Daily summary
         open_count = len(self.executor.open_positions)

@@ -27,6 +27,7 @@ exchange:
   name: "bitfinex"        # CCXT bitfinex with automatic nonce handling
   testnet: false  # Set to false for live trading
   rate_limit: 1.0  # seconds between API calls
+  trust_exchange_positions: false  # When false, union RiskState-known symbols with exchange positions (safety net for margin shorts)
   ws_reconnect_delay: 5
   ws:
     enabled: true                       # false => pure Phase-2 REST behavior

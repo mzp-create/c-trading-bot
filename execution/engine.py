@@ -74,12 +74,20 @@ class ExecutionEngine:
         )
 
         # --- Internal state ---
-        self._open_positions: List[Dict[str, Any]] = []
-        self._cached_live_positions: List[Dict[str, Any]] = []  # refreshed once per cycle
-        self._live_position_meta: Dict[str, Dict[str, Any]] = {}  # SL/TP tracking for live positions
         self._order_history: deque = deque(maxlen=1000)  # bounded to prevent memory leak (P2-16)
         self._trade_history: deque = deque(maxlen=1000)  # bounded to prevent memory leak (P2-16)
         self._next_order_id: int = 1
+
+        # RiskState: per-symbol SL/TP + trailing metadata (replaces _live_position_meta)
+        from state.risk_state import RiskState
+        self._risk_state = RiskState()
+        # Thin entry records: symbol -> {symbol, side, amount, entry_price, unrealized_pnl}
+        # Used as safety-net fallback for symbols not visible via fetch_positions
+        self._risk_entry: dict[str, dict] = {}
+        # When True, trust exchange-reported positions exclusively (skip union safety net)
+        self._trust_positions = bool(
+            config.get("exchange", {}).get("trust_exchange_positions", False)
+        )
 
         # Rate limiting
         self._rate_limit = float(
@@ -115,49 +123,31 @@ class ExecutionEngine:
     def open_positions(self) -> List[Dict[str, Any]]:
         """List of currently open positions.
 
-        Uses a cached result updated once per bot cycle to avoid hammering
-        the exchange API on every property access (Telegram commands, cycle
-        summaries, position checks all read this).
+        Builds position list from client.fetch_positions() and merges in
+        RiskState SL/TP metadata.  When trust_exchange_positions is False
+        (default), also surfaces any RiskState-known symbols not reported
+        by the exchange — the safety net for Bitfinex margin shorts that
+        vanish from fetch_positions.
         """
-        if self.mode == "paper":
-            return self._open_positions
-        # Live: return cached positions merged with local SL/TP metadata
-        return self._merge_live_positions_with_meta()
-
-    def _merge_live_positions_with_meta(self) -> List[Dict[str, Any]]:
-        """Merge exchange-fetched positions with local SL/TP tracking data."""
-        merged = []
-        # Start with exchange-fetched positions
-        for pos in self._cached_live_positions:
-            symbol = pos.get("symbol", "")
-            # Merge with local metadata (SL/TP set at entry)
-            meta = self._live_position_meta.get(symbol, {})
-            merged_pos = {**pos, **meta}
-            merged.append(merged_pos)
-        
-        # Also include locally tracked positions that aren't in exchange cache
-        # (Bitfinex margin shorts don't appear in fetch_positions)
-        exchange_symbols = {p.get("symbol") for p in self._cached_live_positions}
-        for pos in self._open_positions:
-            symbol = pos.get("symbol", "")
-            if symbol not in exchange_symbols:
-                merged.append(pos)
-        
-        return merged
-
-    def _update_position_cache(self):
-        """Force-refresh the cached live positions from the exchange.
-
-        Called once per bot cycle (inside execute_trade_cycle) so every
-        consumer of open_positions reads fresh-but-not-excessive data.
-        """
-        if self.mode == "paper":
-            return
-        try:
-            positions = self._get_live_positions()
-            self._cached_live_positions = positions
-        except Exception as exc:
-            self._log.error("Failed to update position cache: %s", exc)
+        out = []
+        seen: set = set()
+        for p in self._client.fetch_positions():
+            meta = self._risk_state.get(p.symbol) or {}
+            out.append({
+                "symbol": p.symbol,
+                "side": "buy" if p.side == "long" else "sell",
+                "amount": p.abs_amount,
+                "entry_price": p.entry_price,
+                "unrealized_pnl": p.unrealized_pnl,
+                **meta,
+            })
+            seen.add(p.symbol)
+        if not self._trust_positions:
+            for sym, e in self._risk_entry.items():
+                if sym not in seen:
+                    meta = self._risk_state.get(sym) or {}
+                    out.append({**e, **meta})
+        return out
 
     def _get_position_for_direction_check(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get position for a symbol to validate direction filtering.
@@ -176,62 +166,69 @@ class ExecutionEngine:
         return None
 
     def sync_positions_at_startup(self):
-        """Sync positions from exchange at bot startup and init SL/TP tracking.
-        
-        This ensures that positions opened before the bot started are
-        properly tracked with stop-loss and take-profit levels.
+        """Sync positions from exchange at bot startup and seed RiskState.
+
+        For each exchange position, computes SL/TP from risk config and
+        stores them in RiskState and risk_entry so open_positions returns
+        them with proper SL/TP metadata from the first cycle.
         """
         if self.mode == "paper":
             return
 
         self._log.info("Syncing positions from exchange at startup...")
         try:
-            positions = self._get_live_positions()
-            self._cached_live_positions = positions
-            
-            # Initialize SL/TP metadata for each position from risk config
             sl_pct = self.risk_config.get("stop_loss_pct", 2.0)
             tp_pct = self.risk_config.get("take_profit_pct", 4.0)
-            
+            sl_pct_decimal = sl_pct / 100.0
+            tp_pct_decimal = tp_pct / 100.0
+
             synced_count = 0
-            for pos in positions:
-                symbol = pos.get("symbol", "")
-                entry_price = pos.get("entry_price", 0)
-                side = pos.get("side", "buy")
-                
+            for p in self._client.fetch_positions():
+                if p.abs_amount == 0:
+                    continue
+                symbol = p.symbol
+                entry_price = float(p.entry_price or 0)
+                side = "buy" if p.side == "long" else "sell"
+
                 if not symbol or entry_price <= 0:
                     continue
-                
-                # Calculate SL/TP levels
-                sl_pct_decimal = sl_pct / 100.0
-                tp_pct_decimal = tp_pct / 100.0
-                
+
                 if side == "buy":
                     stop_loss = entry_price * (1.0 - sl_pct_decimal)
                     take_profit = entry_price * (1.0 + tp_pct_decimal)
                 else:
                     stop_loss = entry_price * (1.0 + sl_pct_decimal)
                     take_profit = entry_price * (1.0 - tp_pct_decimal)
-                
-                # Store in metadata
-                self._live_position_meta[symbol] = {
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "trailing_stop": self.risk_config.get("trailing_stop", True),
-                    "trailing_activation": self.risk_config.get("trailing_stop_activation", 2.0),
-                    "trailing_distance": self.risk_config.get("trailing_stop_distance", 0.5),
-                    "highest_price": entry_price if side == "buy" else 0,
-                    "lowest_price": entry_price if side == "sell" else float('inf'),
+
+                self._risk_state.set(
+                    symbol,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    trailing_stop=bool(self.risk_config.get("trailing_stop", True)),
+                    trailing_activation=float(
+                        self.risk_config.get("trailing_stop_activation", 2.0)),
+                    trailing_distance=float(
+                        self.risk_config.get("trailing_stop_distance", 0.5)),
+                    entry_price=entry_price,
+                    side=side,
+                )
+                self._risk_entry[symbol] = {
+                    "symbol": symbol,
+                    "side": side,
+                    "amount": float(p.abs_amount),
+                    "entry_price": entry_price,
+                    "unrealized_pnl": float(p.unrealized_pnl or 0.0),
                 }
-                
+
                 self._log.info(
-                    f"  Synced {symbol} {side.upper()}: entry=${entry_price:.2f}, "
-                    f"SL=${stop_loss:.2f}, TP=${take_profit:.2f}"
+                    "  Synced %s %s: entry=$%.2f, SL=$%.2f, TP=$%.2f",
+                    symbol, side.upper(), entry_price, stop_loss, take_profit,
                 )
                 synced_count += 1
-            
-            self._log.info(f"Position sync complete: {synced_count} position(s) loaded")
-            
+
+            self._log.info("Position sync complete: %d position(s) loaded",
+                           synced_count)
+
         except Exception as exc:
             self._log.error("Failed to sync positions at startup: %s", exc)
 
@@ -343,10 +340,11 @@ class ExecutionEngine:
         self._log.info("Cancelling order %s", order_id)
 
         if self.mode == "paper":
-            # Find and mark cancelled
-            for pos in self._open_positions:
-                if pos.get("order_id") == order_id:
-                    self._open_positions.remove(pos)
+            # Find and mark cancelled by checking _risk_entry for matching order_id
+            for sym, entry in list(self._risk_entry.items()):
+                if entry.get("order_id") == order_id:
+                    self._risk_state.clear(sym)
+                    self._risk_entry.pop(sym, None)
                     self._log.info("Paper order %s cancelled", order_id)
                     return True
             self._log.warning("Order %s not found in open positions", order_id)
@@ -366,23 +364,15 @@ class ExecutionEngine:
 
     def get_position(self, symbol: str) -> Dict[str, Any]:
         """Return current position info for a symbol."""
-        if self.mode == "paper":
-            for pos in self._open_positions:
-                if pos.get("symbol") == symbol:
-                    return deepcopy(pos)
-            return {
-                "symbol": symbol,
-                "amount": 0.0,
-                "entry_price": 0.0,
-                "side": None,
-            }
-
-        if self._client:
-            try:
-                return self._client.fetch_position(symbol)
-            except Exception as exc:
-                self._log.error("Failed to fetch position: %s", exc)
-        return {"symbol": symbol, "amount": 0.0}
+        for pos in self.open_positions:
+            if pos.get("symbol") == symbol:
+                return deepcopy(pos)
+        return {
+            "symbol": symbol,
+            "amount": 0.0,
+            "entry_price": 0.0,
+            "side": None,
+        }
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
         """Return all open positions."""
@@ -483,39 +473,47 @@ class ExecutionEngine:
 
         if stop_loss_pct is not None:
             sl_pct = abs(float(stop_loss_pct)) / 100.0
-            pos["stop_loss"] = (
+            sl_price = (
                 fill_price * (1.0 - sl_pct)
                 if side == "buy"
                 else fill_price * (1.0 + sl_pct)
             )
         else:
-            pos["stop_loss"] = 0.0
+            sl_price = 0.0
 
         if take_profit_pct is not None:
             tp_pct = abs(float(take_profit_pct)) / 100.0
-            pos["take_profit"] = (
+            tp_price = (
                 fill_price * (1.0 + tp_pct)
                 if side == "buy"
                 else fill_price * (1.0 - tp_pct)
             )
         else:
-            pos["take_profit"] = 0.0
+            tp_price = 0.0
 
-        pos["trailing_stop"] = self.risk_config.get("trailing_stop", False)
-        pos["highest_price"] = fill_price if side == "buy" else 0.0
-        pos["lowest_price"] = fill_price if side == "sell" else float("inf")
-
-        # Store SL/TP metadata for position tracking (both paper and live)
-        self._live_position_meta[symbol] = {
-            "stop_loss": pos.get("stop_loss", 0.0),
-            "take_profit": pos.get("take_profit", 0.0),
-            "trailing_stop": pos.get("trailing_stop", False),
-            "highest_price": pos.get("highest_price", 0.0),
-            "lowest_price": pos.get("lowest_price", float("inf")),
-            "order_id": order_id,
+        # Store SL/TP metadata in RiskState (single source of truth)
+        self._risk_state.set(
+            symbol,
+            stop_loss=sl_price,
+            take_profit=tp_price,
+            trailing_stop=bool(self.risk_config.get("trailing_stop", False)),
+            trailing_activation=float(
+                self.risk_config.get("trailing_stop_activation", 2.0)),
+            trailing_distance=float(
+                self.risk_config.get("trailing_stop_distance", 0.5)),
+            entry_price=fill_price,
+            side=side,
+        )
+        # Safety-net entry record: used by open_positions union when the exchange
+        # doesn't report the position (e.g. Bitfinex margin shorts)
+        self._risk_entry[symbol] = {
+            "symbol": symbol,
+            "side": side,
+            "amount": filled,
+            "entry_price": fill_price,
+            "unrealized_pnl": 0.0,
         }
 
-        self._open_positions.append(pos)
         self._order_history.append(pos)
 
         self._log.info(
@@ -565,62 +563,6 @@ class ExecutionEngine:
                 if body.endswith(quote):
                     return f"{body[:-len(quote)]}/{quote}"
         return s
-
-    def _get_live_positions(self) -> List[Dict[str, Any]]:
-        """Fetch current positions from the exchange for ALL configured symbols (P1-10).
-        
-        Uses fetch_positions() to get all positions at once from Bitfinex.
-        """
-        if not self._client:
-            return []
-        try:
-            # fetch_positions() returns list[Position] (typed).
-            typed_positions = self._client.fetch_positions()
-
-            # Build symbol name mapping from config so tBTCUST / BTC/USDT:USDT
-            # -> the config display name (e.g. "BTC/USDT").
-            symbols_config = self.trading_config.get("symbols", [])
-            if not symbols_config:
-                symbols_config = [{"name": self.trading_config.get("symbol", "BTC/USDT"),
-                                   "symbol": "tBTCUST"}]
-
-            symbol_map = {}
-            for sym_config in symbols_config:
-                exchange_symbol = sym_config.get("symbol", "")
-                name = sym_config.get("name", exchange_symbol)
-                for key in (exchange_symbol, name):
-                    norm = self._normalize_symbol(key)
-                    if norm:
-                        symbol_map[norm] = name
-
-            # Convert typed Position objects to the engine's internal dict shape.
-            positions = []
-            for p in typed_positions:
-                if p.abs_amount == 0:
-                    continue
-                # Typed Position already carries display-form symbol; map via
-                # config table so the display name matches the config key.
-                norm = self._normalize_symbol(p.symbol)
-                display_name = symbol_map.get(norm, norm or p.symbol)
-                side = "buy" if p.side == "long" else "sell"
-                # Dual keys (camelCase + snake_case) during migration: external
-                # readers (scripts/reconcile_*, telegram_alerts) still use camelCase.
-                # TODO: drop camelCase aliases once those callers are migrated.
-                positions.append({
-                    "symbol": display_name,
-                    "side": side,
-                    "contracts": p.abs_amount,
-                    "amount": p.abs_amount,
-                    "entryPrice": p.entry_price,
-                    "entry_price": p.entry_price,
-                    "unrealizedPnl": p.unrealized_pnl,
-                    "unrealized_pnl": p.unrealized_pnl,
-                })
-
-            return positions
-        except Exception as exc:
-            self._log.error("Failed to fetch live positions: %s", exc)
-            return []
 
     # ── trade history ────────────────────────────────────────────────────
 
@@ -722,16 +664,15 @@ class ExecutionEngine:
                 position = pos
                 break
 
-        # Live mode: open_positions reads a per-cycle cache. When close_position
-        # is called outside the run loop (Telegram /close, manual) that cache may
-        # be stale/empty, so refresh once from the exchange before giving up —
-        # otherwise we would fail to close a position that really exists.
+        # Live mode: if position not found via open_positions (which already
+        # includes the RiskState union), also check _risk_entry directly in
+        # case the position is RiskState-known but open_positions returned stale
+        # data (e.g. called outside the main loop).
         if not position and self.mode != "paper":
-            self._update_position_cache()
-            for pos in self.open_positions:
-                if pos.get("symbol") == symbol:
-                    position = pos
-                    break
+            entry = self._risk_entry.get(symbol)
+            if entry:
+                meta = self._risk_state.get(symbol) or {}
+                position = {**entry, **meta}
 
         if not position:
             return {
@@ -794,15 +735,11 @@ class ExecutionEngine:
                     exchange_order_id=str(order.id) if order.id is not None
                     else None, fee=fee, fee_currency=fee_ccy)
 
-                # Journal the trade and clear local SL/TP metadata so the
-                # closed position is no longer tracked.
+                # Journal the trade and clear RiskState so the closed
+                # position is no longer tracked.
                 self._record_trade(position, close_price, pnl, reason)
-                if symbol in self._live_position_meta:
-                    del self._live_position_meta[symbol]
-                self._open_positions = [
-                    p for p in self._open_positions
-                    if p.get("symbol") != symbol
-                ]
+                self._risk_state.clear(symbol)
+                self._risk_entry.pop(symbol, None)
 
                 self._log.info(
                     "Position closed: %s PnL=$%.2f (mode=%s)",
@@ -853,5 +790,5 @@ class ExecutionEngine:
     def __repr__(self) -> str:
         return (
             f"<ExecutionEngine mode={self.mode} "
-            f"open_positions={len(self._open_positions)}>"
+            f"open_positions={len(self._risk_entry)}>"
         )
