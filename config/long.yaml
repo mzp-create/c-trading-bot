@@ -56,8 +56,8 @@ exchange:
   # FALLBACK (single instance only): the shared key below is safe ONLY if this is
   # the sole process hitting Bitfinex. Do NOT run long+short on the shared key.
   # (Config loader resolves plain ${VAR}; it does not support ${VAR:-default}.)
-  api_key: "${BITFINEX_API_KEY}"
-  api_secret: "${BITFINEX_API_SECRET}"
+  api_key: "${BITFINEX_LONG_API_KEY}"
+  api_secret: "${BITFINEX_LONG_API_SECRET}"
 
 strategies:
   enabled: ["ensemble", "trend_following"]

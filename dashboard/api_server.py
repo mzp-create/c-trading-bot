@@ -32,11 +32,15 @@ import urllib.request
 HERE = Path(__file__).resolve().parent
 BOT_DIR = HERE.parent  # trading-bot/
 CONFIG_PATH = BOT_DIR / "config" / "default.yaml"
-# Trade history now lives in SQLite (one DB per instance). Union all that exist.
+# Trade history now lives in SQLite (one DB per instance, per mode). The engine
+# writes mode-suffixed files (trading.live.db / trading.paper.db) so paper never
+# contaminates live; surface the LIVE DBs here, plus the legacy unsuffixed
+# trading.db for backward compatibility with pre-split data. Union all that exist.
 DB_PATHS = [
-    BOT_DIR / "data" / "trading.db",
-    BOT_DIR / "instances" / "long" / "data" / "trading.db",
-    BOT_DIR / "instances" / "short" / "data" / "trading.db",
+    BOT_DIR / "data" / "trading.live.db",
+    BOT_DIR / "data" / "trading.db",  # legacy (pre mode-split)
+    BOT_DIR / "instances" / "long" / "data" / "trading.live.db",
+    BOT_DIR / "instances" / "short" / "data" / "trading.live.db",
 ]
 LOG_PATH = BOT_DIR / "logs" / "bot.log"
 ENV_PATH = BOT_DIR / ".env"

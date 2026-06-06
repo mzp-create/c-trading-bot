@@ -91,6 +91,12 @@ class ExecutionEngine:
         # — see TradingRepository.
         db_path = self.data_config.get("db_file") or str(
             Path(self.data_config.get("data_dir", "data")) / "trading.db")
+        # Never share one DB file between paper and live: paper positions would
+        # otherwise contaminate live trading (root cause of the 2026-06-05
+        # stale-position incident). Suffix the filename with the mode so paper
+        # writes trading.paper.db and live writes trading.live.db.
+        _dbp = Path(db_path)
+        db_path = str(_dbp.with_name(f"{_dbp.stem}.{self.mode}{_dbp.suffix}"))
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._repo = TradingRepository(db_path, instance=self.instance,
                                        mode=self.mode)
@@ -118,11 +124,17 @@ class ExecutionEngine:
         seen: set = set()
         for p in self._client.fetch_positions():
             meta = self._risk_state.get(p.symbol) or {}
+            # Use local entry price if available (more accurate from actual
+            # fill). Guard with `is not None` — a legitimate entry price could be
+            # falsy-but-valid, and falling back to the exchange value is exactly
+            # the stale-price bug this guards against.
+            local_entry = self._risk_entry.get(p.symbol, {}).get("entry_price")
+            entry_price = local_entry if local_entry is not None else p.entry_price
             out.append({
                 "symbol": p.symbol,
                 "side": "buy" if p.side == "long" else "sell",
                 "amount": p.abs_amount,
-                "entry_price": p.entry_price,
+                "entry_price": entry_price,
                 "unrealized_pnl": p.unrealized_pnl,
                 **meta,
             })

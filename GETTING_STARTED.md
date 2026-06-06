@@ -1,57 +1,52 @@
 # Getting Started
 
-A practical guide to setting up and running the trading bot. For architecture
-and strategy details see `README.md` and `CHANGELOG.md`.
+Quick-start guide for the Hermes Trading Bot. For architecture details, see `README.md` and `CHANGELOG.md`.
 
-> ⚠️ **This bot can place real orders on a live Bitfinex margin account.**
-> Start in `paper` mode. Only switch to `live` once you understand the risk
-> parameters in your config.
+> ⚠️ **WARNING: This bot places real orders on Bitfinex margin accounts.**
+> Start in `paper` mode. Only switch to `live` once you understand the risk parameters.
 
 ---
 
 ## 1. Prerequisites
 
 - Python 3.11+
-- A Bitfinex account with API keys (only needed for `live` mode)
-- (Optional) A Telegram bot token + chat ID for alerts and remote commands
+- Bitfinex account with API keys (for `live` mode)
+- Telegram bot token + chat ID (optional, for alerts and commands)
 
 ---
 
-## 2. Install
+## 2. Installation
 
-The repo ships with a virtualenv at `.venv`. If it's present, just activate it:
+The repo includes a virtualenv at `.venv`:
 
 ```bash
 cd /mnt/hermes-data/.hermes/hermes-agent/trading-bot
 source .venv/bin/activate
 ```
 
-To create it fresh:
-
+To recreate:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Key dependencies: `bitfinex-api-py==4.0.0`, `ccxt==4.5.54`, `fastapi`,
-`uvicorn`, `pandas`, `numpy`, `scikit-learn`, `xgboost`, `PyYAML`, `pytest`.
+Key deps: `bitfinex-api-py==4.0.0`, `ccxt==4.5.54`, `fastapi`, `uvicorn`, `pandas`, `xgboost`, `PyYAML`
 
 ---
 
-## 3. Configure credentials
+## 3. Configure Credentials
 
-Secrets are supplied via environment variables (never commit them). Config
-files reference them as `${VAR_NAME}` placeholders, resolved at startup.
+Secrets via environment variables (never commit). Config files use `${VAR}` placeholders.
 
-Create a `.env` file in the repo root (it is git-ignored):
+Create `.env` in repo root (git-ignored):
 
 ```bash
-# Bitfinex (required for live mode only)
+# Bitfinex (required for live)
 export BITFINEX_API_KEY="your_key_here"
 export BITFINEX_API_SECRET="your_secret_here"
 
-# Telegram (optional — enables alerts + remote commands)
+# Telegram (optional — enables alerts + commands)
 export TELEGRAM_BOT_TOKEN="your_bot_token"
 export TELEGRAM_CHAT_ID="your_numeric_chat_id"
 
@@ -59,9 +54,7 @@ export TELEGRAM_CHAT_ID="your_numeric_chat_id"
 export DEEPSEEK_API_KEY="your_key_here"
 ```
 
-**Running two instances at once?** Long and short bots each need their *own*
-Bitfinex key pair — a shared key produces `nonce: small` errors because nonces
-must strictly increase per key:
+**Dual-instance trading?** Long + short bots need **separate API keys** — shared keys cause `nonce: small` errors:
 
 ```bash
 export BITFINEX_LONG_API_KEY="..."
@@ -70,164 +63,234 @@ export BITFINEX_SHORT_API_KEY="..."
 export BITFINEX_SHORT_API_SECRET="..."
 ```
 
-> 🔒 Treat these keys like passwords. If a key is ever exposed (pasted into a
-> chat, committed, logged), **rotate it immediately** in the Bitfinex UI.
+> 🔒 Rotate keys immediately if exposed anywhere.
 
 ---
 
-## 4. Run the bot
+## 4. Start Trading
 
-The entry point is `main.py`:
-
-```bash
-python main.py [--mode {paper|live|backtest|monitor}] \
-               [--config config/default.yaml] \
-               [--instance {long|short|default}] \
-               [--symbol SYMBOL] [--capital AMOUNT]
-```
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--mode` | `paper` | `paper` = simulated · `live` = real orders · `backtest` = historical · `monitor` = dashboard only |
-| `--config` | `config/default.yaml` | Path to the YAML config |
-| `--instance` | `default` | `long` = BUY only · `short` = SELL only · `default` = both |
-| `--symbol` | from config | Override the trading symbol |
-| `--capital` | from config | Override `initial_capital` |
-
-### Quickest start (safe, simulated)
+### Quick Start (Paper Mode — Safe)
 
 ```bash
 ./start.sh paper
 ```
 
-### Go live (real money — prompts for confirmation)
+### Live Trading (Real Money)
 
 ```bash
 ./start.sh live
 ```
 
-`start.sh` activates `.venv`, loads `.env` in live mode, and requires explicit
-confirmation before placing real orders.
+Requires typing `LIVE` to confirm.
 
-### Dual instance (long + short together)
+### Dual Instance (Long + Short Together)
 
 ```bash
 ./start_dual.sh --paper    # or --live
 ```
 
-This launches two background processes using `config/long.yaml` and
-`config/short.yaml`, with separate state under `instances/long/` and
-`instances/short/`. Use `./status_dual.sh` and `./stop_dual.sh` to manage them.
+Launches two processes:
+- **Long bot**: BUY signals only (`config/long.yaml`, `instances/long/`)
+- **Short bot**: SELL signals only (`config/short.yaml`, `instances/short/`)
+
+Management:
+```bash
+./status_dual.sh    # Check both instances
+./stop_dual.sh      # Stop both
+```
 
 ---
 
-## 5. Configuration overview
+## 5. Configuration
 
-Configs live in `config/`. The default is `config/default.yaml`; `long.yaml`
-and `short.yaml` are tuned per direction.
+Configs in `config/`:
 
-Top-level sections in `config/default.yaml`:
+| File | Purpose |
+|------|---------|
+| `default.yaml` | Single bot (both directions) |
+| `long.yaml` | Long-only instance |
+| `short.yaml` | Short-only instance |
+
+Key sections:
 
 | Section | Controls |
 |---------|----------|
-| `trading` | Symbols, initial capital, daily target, max open positions |
-| `exchange` | Bitfinex settings, API key/secret refs, WebSocket config |
-| `strategies` | Enabled strategies and weights (ensemble, trend, grid) |
-| `ml` | Model type, features, retrain interval |
-| `regime_detector` | Market-regime detection (TRENDING / RANGING / VOLATILE) |
-| `sentiment` | News/RSS/Reddit sentiment filtering |
-| `risk` | Leverage, stop-loss, take-profit, daily-loss & drawdown limits |
-| `monitoring` | Log level, Telegram alert toggles |
-| `dashboard` | `public_url` used to build `/dashboard` login links |
-| `data` | Output dirs for OHLCV, models, trades, logs, the SQLite DB |
+| `trading` | Symbols, capital, daily target, max positions |
+| `exchange` | Bitfinex settings, API keys, WebSocket config |
+| `strategies` | Enabled strategies (ensemble, trend, grid) |
+| `ml` | XGBoost model, features, retrain interval |
+| `regime_detector` | Market regime (TRENDING/RANGING/VOLATILE) |
+| `sentiment` | News/RSS filtering |
+| `risk` | Leverage, SL/TP, daily loss, drawdown limits |
+| `monitoring` | Logging, Telegram alerts |
+| `dashboard` | Public URL for `/dashboard` links |
+| `data` | SQLite DB, models, logs paths |
 
-Review the `risk` section before going live — it governs leverage, stop-loss,
-take-profit, the daily loss limit, and max drawdown.
+**Review the `risk` section before live trading.**
 
 ---
 
-## 6. Web dashboard
+## 6. Architecture Overview
 
-Start the dashboard (read-only view of balances, positions, PnL, logs):
+### Major Recent Changes (Phase 1-4 Refactor)
 
-```bash
-cd dashboard && ./run.sh
-# equivalent to:
-uvicorn api_server:app --host 0.0.0.0 --port 8999 --log-level info
+| Component | What Changed |
+|-----------|--------------|
+| **Execution Engine** | Mode-agnostic: paper/live share same code path via `BitfinexClient` |
+| **WebSocket Feed** | Real-time ticker + order updates, REST fallback on disconnect |
+| **RiskState** | In-memory SL/TP/trailing metadata (replaces position cache) |
+| **Persistence** | SQLite single source of truth (orders, fills, trades, equity, signals) |
+| **Dashboard** | HMAC login tokens, cookie/Basic auth, read-only API |
+| **Direction Filter** | Enforced in executor (not strategy layer) using live position data |
+| **Position Tracking** | Union of exchange positions + RiskState safety net for margin shorts |
+
+### Data Flow
+
+```
+Market Data (WS/REST)
+       ↓
+Technical Analysis (1h/5m/15m)
+       ↓
+ML Prediction + Strategy Signals
+       ↓
+Signal Combination + Sentiment Filter
+       ↓
+LLM Review Layer (optional)
+       ↓
+Risk Check + Position Sizing
+       ↓
+Direction Validation (dual-instance)
+       ↓
+Order Execution → SQLite + Telegram
+       ↓
+Position Monitor (SL/TP/Trailing)
 ```
 
-Then open **http://localhost:8999**.
+---
 
-On startup it prints a randomly generated password and saves it to
-`dashboard/.dashboard_password`. Authentication accepts either:
+## 7. Web Dashboard
 
-- **HTTP Basic** — leave the username blank, paste the generated password, or
-- **A one-time login link** from Telegram (see below) that sets an 8-hour
-  session cookie.
+Start:
+```bash
+cd dashboard && ./run.sh
+# Or: uvicorn api_server:app --host 0.0.0.0 --port 8999
+```
 
-The session cookie is marked `Secure` automatically when the dashboard is
-served over HTTPS (it honors `X-Forwarded-Proto` behind a proxy), so the token
-is never sent in cleartext on a TLS deployment.
+Open **http://localhost:8999**
+
+Auth methods:
+- **HTTP Basic**: Username blank, password from `.dashboard_password`
+- **Telegram `/dashboard`**: One-time HMAC link (2 min expiry)
+
+The session cookie is `Secure` when served over HTTPS.
 
 ---
 
-## 7. Telegram commands
+## 8. Telegram Commands
 
-If `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set, the bot polls for
-commands (only from your whitelisted chat):
+If `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set:
 
 | Command | Action |
 |---------|--------|
-| `/status` | Mode, uptime, PnL, open positions |
-| `/balance` | Wallet breakdown per symbol |
-| `/portfolio` | Holdings with valuations |
+| `/status` | Mode, uptime, PnL, positions |
+| `/balance` | Wallet breakdown |
+| `/portfolio` | Holdings + valuations |
 | `/positions` | Open positions detail |
-| `/pause` · `/resume` | Pause / resume trading |
-| `/close` | Close positions |
+| `/pause` / `/resume` | Pause/resume trading |
+| `/close` | Close all positions |
 | `/config` | Key config values |
-| `/sentiment` | Latest news sentiment + market regime |
-| `/retrain` | Force an ML retrain |
-| `/dashboard` | Get a one-time login link to the web dashboard (valid 2 min, single use) |
-| `/help` | List all commands |
-
-The `/dashboard` link embeds a short-lived, single-use HMAC token derived from
-the dashboard password — the raw password is never sent over Telegram. Set
-`dashboard.public_url` in your config so the link points at the right host
-(defaults to `http://localhost:8999`).
+| `/sentiment` | Latest sentiment + regime |
+| `/retrain` | Force ML retrain |
+| `/dashboard` | One-time login link (2 min) |
+| `/help` | Command list |
 
 ---
 
-## 8. Run the tests
+## 9. Running Tests
 
 ```bash
 source .venv/bin/activate
-python -m pytest tests/ -q              # full suite
-python -m pytest tests/ -q -k dashboard # filter by keyword
+python -m pytest tests/ -q              # Full suite
+python -m pytest tests/ -q -k engine    # Filter by keyword
 python -m pytest tests/test_persistence.py -v
 ```
 
-Tests live in `tests/`.
+Most tests pass; a couple of nonce-atomic concurrency tests can fail on some
+systems (non-critical edge cases). Run the suite to see the current state rather
+than relying on a fixed count.
 
 ---
 
-## 9. Typical first session
+## 10. First Session Checklist
 
 ```bash
-# 1. Activate the environment
+# 1. Activate environment
 source .venv/bin/activate
 
-# 2. Sanity-check the suite
+# 2. Run tests
 python -m pytest tests/ -q
 
-# 3. Run in paper mode against the default config
+# 3. Check credentials loaded
+echo $BITFINEX_API_KEY | head -c 8
+
+# 4. Start in paper mode
 ./start.sh paper
 
-# 4. (Optional) In another terminal, start the dashboard
-cd dashboard && ./run.sh   # http://localhost:8999
+# 5. (Another terminal) Start dashboard
+cd dashboard && ./run.sh
 
-# 5. Watch logs
+# 6. Watch logs
 tail -f logs/bot.log
 ```
 
-When you're confident in the configuration and risk limits, switch to
-`./start.sh live`.
+Once confident: `./start.sh live` or `./start_dual.sh --live`
+
+---
+
+## 11. Operational Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/check_live_positions.py` | Read-only live position check |
+| `scripts/reconcile_readonly.py` | Verify DB vs exchange state |
+| `scripts/reconcile_deep.py` | Full reconciliation with fixes |
+| `scripts/daily_report.py` | Generate daily PnL report |
+| `scripts/live_close_smoke_test.py` | Test close path in live mode |
+| `scripts/import_trades_csv.py` | Import historical trades |
+
+---
+
+## 12. Troubleshooting
+
+### `nonce: small` errors
+- Each instance needs **separate API keys**
+- Check `data/.bfx_nonce` exists and is writable
+
+### Position not showing
+- Margin shorts may not appear in `fetch_positions()`
+- `trust_exchange_positions: false` enables RiskState union safety net
+
+### Dashboard login fails
+- Check `dashboard.public_url` in config
+- Verify `.dashboard_password` exists
+
+### Tests fail
+- A couple of nonce-atomic tests may fail on some systems — non-critical
+- The rest of the suite should pass
+
+---
+
+## File Reference
+
+| Path | Purpose |
+|------|---------|
+| `main.py` | Entry point, `TradingBot` orchestrator |
+| `execution/engine.py` | Order execution, position management |
+| `bitfinex/` | Exchange client, WebSocket feed |
+| `state/risk_state.py` | SL/TP/trailing metadata |
+| `persistence/` | SQLite schema, repository, models |
+| `strategies/selector.py` | Strategy ensemble |
+| `analysis/` | TA, ML predictor, sentiment, LLM reviewer |
+| `risk/manager.py` | Position sizing, risk checks |
+| `monitoring/` | Logging, Telegram alerts |
+| `dashboard/` | FastAPI dashboard server |

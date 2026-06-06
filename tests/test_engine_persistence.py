@@ -22,7 +22,20 @@ def test_engine_builds_repo(tmp_path):
     eng = _engine(tmp_path)
     assert eng._repo is not None
     assert eng._repo.instance == "long"
-    assert (tmp_path / "trading.db").exists()
+    # DB file is mode-suffixed so paper never shares a file with live.
+    assert (tmp_path / "trading.paper.db").exists()
+
+
+def test_paper_and_live_use_separate_db_files(tmp_path):
+    """Paper and live must never share one DB file (contamination guard)."""
+    config = {"data": {"db_file": str(tmp_path / "trading.db")},
+              "exchange": {"rate_limit": 0.0}}
+    ExecutionEngine(config, mode="paper", trade_direction="both", instance="long")
+    ExecutionEngine(config, mode="live", trade_direction="both", instance="long")
+    assert (tmp_path / "trading.paper.db").exists()
+    assert (tmp_path / "trading.live.db").exists()
+    # The unsuffixed name is never created.
+    assert not (tmp_path / "trading.db").exists()
 
 
 def test_record_trade_writes_to_db(tmp_path):
@@ -44,7 +57,7 @@ def test_db_path_defaults_to_data_dir(tmp_path):
     config = {"data": {"data_dir": str(tmp_path / "sub")},
               "exchange": {}}
     eng = ExecutionEngine(config, mode="paper", trade_direction="both")
-    assert (tmp_path / "sub" / "trading.db").exists()
+    assert (tmp_path / "sub" / "trading.paper.db").exists()
 
 
 def test_execute_order_records_order(tmp_path):

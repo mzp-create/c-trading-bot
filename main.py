@@ -104,6 +104,12 @@ class TradingBot:
 
         self.mode = mode
         self.instance = instance
+        # Propagate the instance name into the config so EVERY BitfinexClient
+        # built from it (MarketDataCollector, ExecutionEngine) registers the
+        # API key under the SAME instance/pid — otherwise the collector's client
+        # claims the key as 'default' and the engine's 'long'/'short' claim
+        # collides with it (KeyConflictError) on dual-instance startup.
+        self.config["instance"] = instance
         self.running = False
         self.paused = False
         self.start_time = None
