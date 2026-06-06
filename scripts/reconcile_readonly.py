@@ -1,63 +1,123 @@
-"""READ-ONLY Bitfinex reconciliation. Places NO orders. Fetches positions,
-balances, recent closed orders and trades to compare against bot logs."""
-import os, sys, json
-import ccxt
+#!/usr/bin/env python3
+"""READ-ONLY Bitfinex reconciliation via the bot's BfxRest. Places NO orders.
 
-key = os.environ.get("BITFINEX_API_KEY")
-secret = os.environ.get("BITFINEX_API_SECRET")
-if not key or not secret:
-    print("ERROR: API key/secret not in env"); sys.exit(1)
+Fetches positions, balances, recent orders and trades to compare against bot
+logs. Routes through `bitfinex.rest.BfxRest` (the live bot's authenticated path)
+instead of an independent ccxt client — the ccxt version failed with
+"nonce: small" because its millisecond nonce was below the high-water mark the
+bot's bfxapi client had already set on the shared key. One bfxapi client = one
+monotonic nonce source, so no collision (and the correct REST host).
 
-ex = ccxt.bitfinex({"apiKey": key, "secret": secret, "enableRateLimit": True,
-                    "options": {"defaultType": "margin"}})
+Usage:  python scripts/reconcile_readonly.py [--config config/long.yaml]
+"""
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
 
-SYMS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
-def section(t): print("\n" + "=" * 60 + "\n" + t + "\n" + "=" * 60)
+# Load .env so ${...} refs in the config (and BITFINEX_* fallbacks) resolve.
+_envf = ROOT / ".env"
+if _envf.exists():
+    for _line in _envf.read_text().splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#"):
+            continue
+        if _line.startswith("export "):
+            _line = _line[7:]
+        if "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
-section("OPEN DERIVATIVE POSITIONS (fetch_positions)")
-try:
-    pos = ex.fetch_positions()
-    live = [p for p in pos if p.get("contracts")]
-    if not live:
-        print("  (none reported open)")
-    for p in live:
-        print(f"  {p.get('symbol')}: side={p.get('side')} contracts={p.get('contracts')} "
-              f"entry={p.get('entryPrice')} uPnL={p.get('unrealizedPnl')} lev={p.get('leverage')}")
-except Exception as e:
-    print("  fetch_positions error:", repr(e))
+import yaml  # noqa: E402
+from bitfinex import symbols  # noqa: E402
+from bitfinex.rest import BfxRest  # noqa: E402
 
-section("MARGIN / DERIVATIVES BALANCE (non-zero only)")
-try:
-    bal = ex.fetch_balance()
-    tot = {k: v for k, v in bal.get("total", {}).items() if v}
-    print("  totals:", json.dumps(tot))
-except Exception as e:
-    print("  fetch_balance error:", repr(e))
+SYMS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+_REF = re.compile(r"\$\{([^}]+)\}")
 
-for sym in SYMS:
-    section(f"RECENT CLOSED ORDERS — {sym}")
+
+def _resolve(s: str) -> str:
+    return _REF.sub(lambda m: os.environ.get(m.group(1), ""), s or "")
+
+
+def section(t):
+    print("\n" + "=" * 60 + "\n" + t + "\n" + "=" * 60)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default="config/long.yaml")
+    ap.add_argument("--limit", type=int, default=10)
+    args = ap.parse_args()
+
+    ex = (yaml.safe_load(open(ROOT / args.config)) or {}).get("exchange", {})
+    api_key = _resolve(ex.get("api_key", "")) or os.environ.get("BITFINEX_API_KEY", "")
+    api_secret = _resolve(ex.get("api_secret", "")) or os.environ.get("BITFINEX_API_SECRET", "")
+    if not api_key or not api_secret:
+        sys.exit("ERROR: API key/secret not found (config ${...} refs or "
+                 "BITFINEX_API_KEY/SECRET env).")
+
+    rest = BfxRest(api_key, api_secret)
+
+    section("OPEN POSITIONS (fetch_positions)")
     try:
-        orders = ex.fetch_closed_orders(sym, limit=10)
-        if not orders:
-            print("  (none)")
-        for o in orders[-10:]:
-            print(f"  {o.get('datetime')} {o.get('side')} {o.get('type')} "
-                  f"amt={o.get('amount')} filled={o.get('filled')} "
-                  f"avg={o.get('average')} status={o.get('status')} id={o.get('id')}")
-    except Exception as e:
-        print("  fetch_closed_orders error:", repr(e))
+        pos = rest.get_positions()
+        if not pos:
+            print("  (none reported open)")
+        for p in pos:
+            print(f"  {p.symbol}: side={p.side} amount={p.amount} "
+                  f"entry={p.entry_price} uPnL={p.unrealized_pnl} lev={p.leverage}")
+    except Exception as e:  # noqa: BLE001
+        print("  get_positions error:", repr(e))
 
-for sym in SYMS:
-    section(f"RECENT TRADES (fills) — {sym}")
+    section("WALLET BALANCES (non-zero only)")
     try:
-        trades = ex.fetch_my_trades(sym, limit=10)
-        if not trades:
-            print("  (none)")
-        for t in trades[-10:]:
-            print(f"  {t.get('datetime')} {t.get('side')} amt={t.get('amount')} "
-                  f"price={t.get('price')} cost={t.get('cost')} fee={t.get('fee')}")
-    except Exception as e:
-        print("  fetch_my_trades error:", repr(e))
+        for w in rest.get_wallets():
+            if w.balance:
+                print(f"  {w.wallet_type:8} {w.currency:6} balance={w.balance:.8f} "
+                      f"avail={w.available:.8f}")
+    except Exception as e:  # noqa: BLE001
+        print("  get_wallets error:", repr(e))
 
-print("\nDONE (read-only).")
+    for sym in SYMS:
+        section(f"RECENT ORDERS (history) — {sym}")
+        try:
+            # Reuse the BfxRest bfxapi client (same nonce source) for the one
+            # read it doesn't wrap as a typed method.
+            rows = rest._client.rest.auth.get_orders_history(
+                symbol=symbols.to_bitfinex(sym), limit=args.limit)
+            if not rows:
+                print("  (none)")
+            for o in rows:
+                print(f"  id={getattr(o, 'id', '?')} "
+                      f"amt_orig={getattr(o, 'amount_orig', '?')} "
+                      f"type={getattr(o, 'order_type', '?')} "
+                      f"status={getattr(o, 'order_status', '?')} "
+                      f"avg={getattr(o, 'price_avg', '?')} "
+                      f"mts={getattr(o, 'mts_update', '?')}")
+        except Exception as e:  # noqa: BLE001
+            print("  get_orders_history error:", repr(e))
+
+    for sym in SYMS:
+        section(f"RECENT TRADES (fills) — {sym}")
+        try:
+            fills = rest.get_trades(sym, limit=args.limit)
+            if not fills:
+                print("  (none)")
+            for t in fills:
+                print(f"  {t.ts} {t.side} amt={t.amount} price={t.price} "
+                      f"fee={t.fee} {t.fee_currency or ''}")
+        except Exception as e:  # noqa: BLE001
+            print("  get_trades error:", repr(e))
+
+    print("\nDONE (read-only).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

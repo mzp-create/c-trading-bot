@@ -1,68 +1,82 @@
 #!/usr/bin/env python3
-"""Simple Bitfinex balance check using REST API directly."""
+"""READ-ONLY live Bitfinex balance + positions, via the bot's BfxRest.
+
+Goes through `bitfinex.rest.BfxRest` (the same authenticated path the live bot
+uses) rather than a bare bfxapi client. This fixes two bugs the old version had:
+  * it hardcoded REST_HOST="https://api.bitfinex.com" (missing the "/v2"), so
+    auth/r/wallets hit the wrong path and returned an empty body (JSONDecodeError);
+  * independent clients on the shared key collided on nonces ("nonce: small").
+Using the bot's BfxRest gives the correct host and a single nonce source.
+
+Places NO orders.  Usage:  python check_bfx_balance.py [--config config/long.yaml]
+"""
+import argparse
 import os
+import re
 import sys
-_ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _ROOT)
+from pathlib import Path
 
-# Load env
-env_path = os.path.join(_ROOT, '.env')
-with open(env_path) as f:
-    for line in f:
-        line = line.strip()
-        if not line or line.startswith('#'):
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+# Load .env so ${...} refs in the config (and BITFINEX_* fallbacks) resolve.
+_envf = ROOT / ".env"
+if _envf.exists():
+    for _line in _envf.read_text().splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#"):
             continue
-        if line.startswith('export '):
-            line = line[7:]
-        if '=' in line:
-            key, val = line.split('=', 1)
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = val
+        if _line.startswith("export "):
+            _line = _line[7:]
+        if "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
-from bfxapi import Client
+import yaml  # noqa: E402
+from bitfinex.rest import BfxRest  # noqa: E402
 
-REST_HOST = "https://api.bitfinex.com"
+_REF = re.compile(r"\$\{([^}]+)\}")
 
-# Use LONG API key
-api_key = os.environ.get('BITFINEX_LONG_API_KEY', '')
-api_secret = os.environ.get('BITFINEX_LONG_API_SECRET', '')
 
-if not api_key or not api_secret:
-    print("API keys not found in environment")
-    sys.exit(1)
+def _resolve(s: str) -> str:
+    return _REF.sub(lambda m: os.environ.get(m.group(1), ""), s or "")
 
-# Create client
-client = Client(api_key=api_key, api_secret=api_secret, rest_host=REST_HOST)
 
-print("=== Bitfinex Live Balance ===\n")
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default="config/long.yaml",
+                    help="Config whose exchange.api_key/secret (${...} refs) to use.")
+    args = ap.parse_args()
 
-# Get wallets
-wallets = client.rest.auth.get_wallets()
-total_usd = 0
-for w in wallets:
-    currency = w.currency.upper()
-    balance = float(w.balance)
-    available = float(getattr(w, 'available_balance', w.balance))
-    wallet_type = w.wallet_type
-    
-    print(f"{currency}: {balance:.6f} (avail: {available:.6f}) [{wallet_type}]")
-    
-    if currency == 'USD' or currency == 'USDT':
-        total_usd += balance
+    ex = (yaml.safe_load(open(ROOT / args.config)) or {}).get("exchange", {})
+    api_key = _resolve(ex.get("api_key", "")) or os.environ.get("BITFINEX_API_KEY", "")
+    api_secret = _resolve(ex.get("api_secret", "")) or os.environ.get("BITFINEX_API_SECRET", "")
+    if not api_key or not api_secret:
+        sys.exit("ERROR: API key/secret not found (config ${...} refs or "
+                 "BITFINEX_API_KEY/SECRET env).")
 
-print(f"\nTotal USD/USDT: ${total_usd:.2f}")
+    rest = BfxRest(api_key, api_secret)
 
-# Get positions
-print("\n=== Open Positions ===")
-positions = client.rest.auth.get_positions()
-if positions:
-    for p in positions:
-        symbol = p.symbol
-        amount = float(p.amount)
-        entry = float(getattr(p, 'base_price', 0))
-        pnl = float(getattr(p, 'pl', 0))
-        print(f"{symbol}: {amount:.6f} @ ${entry:.2f} | PnL: ${pnl:.2f}")
-else:
-    print("No open positions")
+    print("=== Bitfinex Live Balance (BfxRest) ===\n")
+    total_usd = 0.0
+    for w in rest.get_wallets():
+        print(f"  {w.wallet_type:8} {w.currency:6} balance={w.balance:.6f} "
+              f"(avail: {w.available:.6f})")
+        if w.currency.upper() in ("USD", "USDT", "UST"):
+            total_usd += w.balance
+    print(f"\nTotal USD/USDT: ${total_usd:.2f}")
+
+    print("\n=== Open Positions ===")
+    positions = rest.get_positions()
+    if positions:
+        for p in positions:
+            print(f"  {p.symbol}: {p.amount:.8f} @ ${p.entry_price:.2f} "
+                  f"| side={p.side} | uPnL: ${p.unrealized_pnl:.2f}")
+    else:
+        print("  No open positions")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
