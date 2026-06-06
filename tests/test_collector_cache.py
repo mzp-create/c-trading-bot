@@ -78,3 +78,46 @@ def test_cache_accepts_fresh_candles(monkeypatch, tmp_path):
     _write_cache(path, fresh_ms)
     df = c._load_from_cache(path, "1h")
     assert df is not None and len(df) == 2
+
+
+# ── since window (stale-fetch regression) ────────────────────────────────────
+
+def test_ohlcv_since_window_ends_near_now(monkeypatch, tmp_path):
+    """Regression for the 2026-06-05 stale-price bug: the 1h `since` must cover
+    the most recent `limit` candles (window ends at ~now), not start 2x too far
+    back and end ~limit periods in the PAST (the old `* 2` lookback)."""
+    captured = {}
+
+    class _CaptureClient:
+        def __init__(self, config, mode=None, instance=None):
+            pass
+
+        def get_ohlcv(self, symbol, timeframe, limit, since=None):
+            captured["since"] = since
+            captured["limit"] = limit
+            now_ms = int(time.time() * 1000)
+            df = pd.DataFrame(
+                {"open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0],
+                 "close": [1.0, 1.0], "volume": [1.0, 1.0]},
+                index=[now_ms - 3_600_000, now_ms])
+            df.index.name = "timestamp"
+            return df
+
+    monkeypatch.setattr(collector_mod, "BitfinexClient", _CaptureClient)
+    c = collector_mod.MarketDataCollector(
+        {"exchange": {"testnet": True}, "data": {"ohlcv_dir": str(tmp_path)}},
+        mode="paper")
+
+    limit, tf = 200, 3600
+    c.get_ohlcv("ETH/USDT", "1h", limit=limit)
+
+    since_s = captured["since"] / 1000.0
+    now = time.time()
+    # Newest candle the API can return ≈ since + limit*tf; it must reach ~now,
+    # not sit ~limit periods (8+ days for 1h) in the past.
+    newest_expected = since_s + captured["limit"] * tf
+    assert newest_expected >= now - 2 * tf, (
+        f"fetch window ends {(now - newest_expected) / 86400:.1f}d in the past "
+        f"— stale (the '* 2' regression)")
+    # Lookback is ~limit periods, not 2x.
+    assert abs((now - since_s) - limit * tf) < tf

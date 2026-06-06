@@ -119,12 +119,18 @@ class MarketDataCollector:
 
         self._log.info("Cache MISS for %s — fetching from Bitfinex", cache_key)
 
-        # For Bitfinex, we need to pass 'since' to get recent 1h+ candles.
-        # Use a timestamp that's 'limit * timeframe_duration' ago.
+        # For Bitfinex 1h+ candles, pass a `since` so the window covers the most
+        # recent `limit` candles: start `limit` periods ago and let the API fill
+        # forward to *now*. Bitfinex returns candles ascending from `since`, so
+        # `since = now - limit*tf` ends at the current candle. (The old code used
+        # `* 2`, which started 2x too far back and therefore returned candles
+        # ending ~limit periods — e.g. ~8 days for 1h — in the PAST. That fed
+        # stale prices into TA/ML and tripped the divergence guard on every 1h
+        # entry: the 2026-06-05 stale-price incident.)
         since = None
         tf_seconds = self._TIMEFRAME_SECONDS.get(timeframe, 3600)
         if tf_seconds >= 3600:  # 1h and above
-            since = int((time.time() - limit * tf_seconds * 2) * 1000)
+            since = int((time.time() - limit * tf_seconds) * 1000)
             self._log.debug("Using since=%d for timeframe=%s", since, timeframe)
 
         # Fetch from exchange with retries
