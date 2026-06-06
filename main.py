@@ -736,7 +736,10 @@ class TradingBot:
             df = self.collector.get_ohlcv(
                 symbol,
                 timeframe="1h",
-                limit=self.config.get('ml', {}).get('min_train_samples', 500)
+                # Fetch well above the 200-row training floor (warmup + target
+                # drops eat ~80-100 rows); min_train_samples is a floor, not the
+                # fetch size — fetching only 100 always failed as insufficient.
+                limit=max(600, int(self.config.get('ml', {}).get('min_train_samples', 200)))
             )
             if df is not None:
                 result = self.ml_predictor.train(df, symbol=symbol)
@@ -960,7 +963,10 @@ class TradingBot:
                 df = self.collector.get_ohlcv(
                     symbol,
                     timeframe="1h",
-                    limit=self.config.get('ml', {}).get('min_train_samples', 500)
+                    # Fetch well above the 200-row training floor (warmup + target
+                # drops eat ~80-100 rows); min_train_samples is a floor, not the
+                # fetch size — fetching only 100 always failed as insufficient.
+                limit=max(600, int(self.config.get('ml', {}).get('min_train_samples', 200)))
                 )
                 if df is not None:
                     self.ml_predictor.train(df, symbol=symbol)

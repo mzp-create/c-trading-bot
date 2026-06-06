@@ -42,13 +42,16 @@ class EnsembleBotStrategy:
             agreement_required = config.get("agreement_required", agreement_required)
             use_position_sizing = config.get("use_dynamic_sizing", use_position_sizing)
         
-        # Initialize ensemble
+        # Initialize ensemble — forward config so it can resolve the model
+        # directory (data.models_dir); without this the inner predictor fell
+        # back to repo-root 'data/models' and missed per-instance models.
         self.ensemble = EnsembleStrategy(
             symbol=symbol,
             ml_weight=ml_weight,
             rl_weight=rl_weight,
             confidence_threshold=confidence_threshold,
-            agreement_required=agreement_required
+            agreement_required=agreement_required,
+            config=config,
         )
         
         self.use_position_sizing = use_position_sizing

@@ -54,12 +54,18 @@ class EnsembleStrategy:
         
         self.log = logging.getLogger(f"Ensemble-{symbol}")
         
-        # Initialize ML predictor
-        self.ml_config = self.config.get('ml', {
-            'models_dir': 'data/models',
-            'training_threshold': 0.6,
-            'min_samples': 200
-        })
+        # Initialize ML predictor. MLPredictor resolves its model directory from
+        # config['data']['models_dir']; honor the bot's instance-scoped path so
+        # per-instance models load. Previously this passed config['ml'] (which
+        # MLPredictor never reads) → it always fell back to repo-root
+        # 'data/models', which is missing some symbols' models (the live
+        # "No such file ... SOL_USDT_ml_model.joblib" error).
+        models_dir = (
+            self.config.get('data', {}).get('models_dir')
+            or self.config.get('ml', {}).get('models_dir')
+            or 'data/models'
+        )
+        self.ml_config = {'data': {'models_dir': models_dir}}
         self.ml_predictor = MLPredictor(self.ml_config)
         
         # Initialize RL strategy
@@ -117,9 +123,10 @@ class EnsembleStrategy:
         try:
             # Check if model is loaded/trained
             if not self.ml_predictor.model_loaded:
-                # Try to load existing model
-                safe_symbol = self.symbol.replace('/', '_')
-                model_path = Path(f"data/models/{safe_symbol}_ml_model.joblib")
+                # Try to load existing model — use the predictor's own resolved
+                # path (honors data.models_dir) instead of a hardcoded repo-root
+                # 'data/models', so per-instance models are found.
+                model_path = self.ml_predictor._get_model_path(self.symbol)
                 if model_path.exists():
                     self.ml_predictor.load_model(self.symbol)
                 else:

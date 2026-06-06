@@ -60,7 +60,13 @@ class StrategySelector:
         # built lazily on first use — see _get_ensemble. Building one instance
         # for symbols[0] and running it on every symbol would feed the wrong
         # model the wrong data.
-        self._ensemble_config = self.strategies_config.get("ensemble", {})
+        # Carry the bot's model directory (data.models_dir) into the ensemble
+        # config so its MLPredictor loads the instance-scoped models, not the
+        # repo-root default.
+        self._ensemble_config = {
+            **self.strategies_config.get("ensemble", {}),
+            "data": {"models_dir": config.get("data", {}).get("models_dir", "data/models")},
+        }
         self._ensembles: Dict[str, Any] = {}
         self._default_symbol = (
             config.get("trading", {}).get("symbols", [{}]) or [{}]
