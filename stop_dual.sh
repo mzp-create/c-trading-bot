@@ -22,14 +22,26 @@ stop_instance() {
                 rm -f "$pid_file"
                 return
             fi
-            echo "Stopping $instance instance (PID: $PID)..."
-            kill "$PID"
-            sleep 2
+            echo "Stopping $instance instance (PID: $PID) — graceful, waiting for position flatten..."
+            kill "$PID" 2>/dev/null || true   # SIGTERM -> _handle_shutdown -> close_all_positions()
+            # Wait for the bot to finish its current cycle and run its graceful
+            # _shutdown() (which flattens open positions) before any SIGKILL. A
+            # cycle (multi-symbol data fetch + LLM) can take ~15s, then the close
+            # path adds a few more; SIGKILL before that would STRAND an open
+            # position on the exchange. Poll up to GRACE seconds.
+            local grace=30 waited=0
+            while kill -0 "$PID" 2>/dev/null && [ "$waited" -lt "$grace" ]; do
+                sleep 1
+                waited=$((waited + 1))
+            done
             if kill -0 "$PID" 2>/dev/null; then
-                echo "  Force killing $instance..."
+                echo "  ! $instance still alive after ${grace}s — sending SIGKILL."
+                echo "    WARNING: graceful flatten may NOT have completed — VERIFY no"
+                echo "    open position remains:  python check_bfx_balance.py"
                 kill -9 "$PID" 2>/dev/null || true
+            else
+                echo "  ✓ $instance stopped gracefully after ${waited}s"
             fi
-            echo "  ✓ $instance stopped"
         else
             echo "  $instance not running (stale PID file)"
         fi
