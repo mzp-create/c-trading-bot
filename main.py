@@ -422,6 +422,38 @@ class TradingBot:
                 "current_price": ta.get('current_price', 0),
             }
 
+    # Max tolerated gap between the OHLCV-derived entry price and the live
+    # ticker before an entry is aborted as a stale-candle/phantom price.
+    _PRICE_DIVERGENCE_TOL = 0.02
+
+    def _price_diverges_from_live(self, symbol: str, price: float) -> bool:
+        """True if the live ticker disagrees with the OHLCV-derived entry
+        ``price`` beyond ``_PRICE_DIVERGENCE_TOL`` — a stale-candle guard against
+        the 2026-06-05 phantom-price incident.
+
+        Fails OPEN (returns False) when the live ticker is unavailable — the
+        collector's candle-staleness check is the other guard layer — but logs
+        a warning so the missing cross-check is visible.
+        """
+        try:
+            live_price = self.collector.get_current_price(symbol)
+        except Exception:
+            live_price = None
+        if not live_price:
+            self.log.warning(
+                f"[{symbol}] live ticker unavailable — opening at OHLCV "
+                f"price {price:.2f} without divergence cross-check"
+            )
+            return False
+        if abs(live_price - price) / live_price > self._PRICE_DIVERGENCE_TOL:
+            self.log.error(
+                f"[{symbol}] OHLCV/ticker price divergence: entry={price:.2f} "
+                f"vs live={live_price:.2f} "
+                f"({abs(live_price - price) / live_price * 100:.1f}%) — skipping"
+            )
+            return True
+        return False
+
     def execute_trade_cycle(self, symbol_config: dict = None):
         """One complete trade cycle for a given symbol config.
 
@@ -524,26 +556,8 @@ class TradingBot:
             # Safety: the entry price (derived from OHLCV) must agree with the
             # live ticker before we open. A stale/mismatched OHLCV candle would
             # otherwise open at a phantom price and get stopped out instantly at
-            # the true market — the 2026-06-05 real-money incident. Abort on
-            # divergence beyond tolerance.
-            try:
-                live_price = self.collector.get_current_price(symbol)
-            except Exception:
-                live_price = None
-            if not live_price:
-                # Fail-open (the collector's candle-staleness check is the other
-                # guard layer), but make it visible — we opened without the live
-                # cross-check.
-                self.log.warning(
-                    f"[{symbol}] live ticker unavailable — opening at OHLCV "
-                    f"price {price:.2f} without divergence cross-check"
-                )
-            if live_price and abs(live_price - price) / live_price > 0.02:
-                self.log.error(
-                    f"[{symbol}] OHLCV/ticker price divergence: entry={price:.2f} "
-                    f"vs live={live_price:.2f} "
-                    f"({abs(live_price - price) / live_price * 100:.1f}%) — skipping"
-                )
+            # the true market — the 2026-06-05 real-money incident.
+            if self._price_diverges_from_live(symbol, price):
                 decision["signal"] = "HOLD"
                 decision["confidence"] = 0.0
                 decision["reason"] += " | PriceDivergence"
