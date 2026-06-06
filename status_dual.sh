@@ -17,7 +17,7 @@ show_instance_status() {
     # Check if running
     if [ -f "$pid_file" ]; then
         PID=$(cat "$pid_file")
-        if kill -0 "$PID" 2>/dev/null; then
+        if kill -0 "$PID" 2>/dev/null && ps -p "$PID" -o args= 2>/dev/null | grep -qE "main\.py.*--instance $instance"; then
             echo "Status:     🟢 RUNNING"
             echo "PID:        $PID"
             echo "Uptime:     $(ps -o etime= -p $PID 2>/dev/null || echo 'unknown')"

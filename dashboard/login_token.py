@@ -9,9 +9,12 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from typing import Optional, Set
+
+_log = logging.getLogger(__name__)
 
 
 def _b64(raw: bytes) -> str:
@@ -28,6 +31,8 @@ def _sign(secret: str, body: str) -> str:
 
 def mint(secret: str, ttl: int = 120) -> str:
     """Return a signed token valid for `ttl` seconds."""
+    if not secret:
+        raise ValueError("refusing to mint a login token with an empty secret")
     payload = {"exp": int(time.time()) + int(ttl), "nonce": os.urandom(8).hex()}
     body = _b64(json.dumps(payload, separators=(",", ":")).encode())
     return f"{body}.{_sign(secret, body)}"
@@ -37,6 +42,8 @@ def verify(secret: str, token: str, used: Optional[Set[str]] = None) -> bool:
     """True iff `token` has a valid signature, is unexpired, and (if `used` is
     given) has an unseen nonce — which is then recorded (single-use). Never
     raises; any malformed/tampered/expired/reused token returns False."""
+    if not secret:
+        return False
     try:
         body, sig = token.split(".", 1)
         if not hmac.compare_digest(sig, _sign(secret, body)):
@@ -50,5 +57,6 @@ def verify(secret: str, token: str, used: Optional[Set[str]] = None) -> bool:
                 return False
             used.add(nonce)
         return True
-    except Exception:
+    except Exception as exc:
+        _log.debug("login token verify failed: %s", exc)
         return False

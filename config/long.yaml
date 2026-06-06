@@ -60,11 +60,13 @@ exchange:
   api_secret: "${BITFINEX_LONG_API_SECRET}"
 
 strategies:
-  enabled: ["ensemble", "trend_following"]
-  
+  enabled: ["trend_following"]
+
   # Ensemble strategy (ML + RL) - LONG only
+  # DISABLED: inert on the live path (1-row DataFrame -> always HOLD). Re-enable
+  # only after wiring real OHLCV through generate(). See PR review Phase C.
   ensemble:
-    enabled: true
+    enabled: false
     ml_weight: 0.4
     rl_weight: 0.6
     confidence_threshold: 0.15

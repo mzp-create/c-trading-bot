@@ -26,10 +26,16 @@ def test_engine_builds_repo(tmp_path):
     assert (tmp_path / "trading.paper.db").exists()
 
 
-def test_paper_and_live_use_separate_db_files(tmp_path):
+def test_paper_and_live_use_separate_db_files(tmp_path, monkeypatch):
     """Paper and live must never share one DB file (contamination guard)."""
+    # Isolate the live path: redirect the key registry into tmp_path and disable
+    # the WS feed so this unit test never mutates the real
+    # data/.bfx_key_registry.json or opens a network connection.
+    import bitfinex.client as bfx_client
+    monkeypatch.setattr(bfx_client, "KEY_REGISTRY_PATH",
+                        str(tmp_path / "key_registry.json"))
     config = {"data": {"db_file": str(tmp_path / "trading.db")},
-              "exchange": {"rate_limit": 0.0}}
+              "exchange": {"rate_limit": 0.0, "ws": {"enabled": False}}}
     ExecutionEngine(config, mode="paper", trade_direction="both", instance="long")
     ExecutionEngine(config, mode="live", trade_direction="both", instance="long")
     assert (tmp_path / "trading.paper.db").exists()

@@ -1,3 +1,11 @@
+> **⚠️ SUPERSEDED / STALE (2026-06-06).** This document describes a pre-`bfxapi`
+> architecture that no longer exists: it references `market_data/bitfinex_client.py`,
+> an atomic-file nonce / `--nonce-file` arg, and `--instance both` — none of which
+> are in the current code (auth nonces now come from the `bfxapi` library via
+> `bitfinex/rest.py`; per-instance isolation is via distinct API keys + the
+> `keyguard` registry). Do NOT rely on this for sign-off. See the current review at
+> `~/.claude/plans/you-are-helping-to-dazzling-comet.md`.
+
 # PR Review: Dual-Instance Trading Bot Migration
 
 ## Branch Strategy

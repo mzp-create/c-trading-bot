@@ -127,7 +127,7 @@ class TradingBot:
         # Initialize components
         self.logger = BotLogger(self.config)
         self.telegram = TelegramNotifier(self.config)
-        self.collector = MarketDataCollector(self.config)
+        self.collector = MarketDataCollector(self.config, mode=mode)
         self.analyzer = TechnicalAnalyzer(self.config)
         self.ml_predictor = MLPredictor(self.config)
         # Pass trade_direction to StrategySelector for signal filtering
@@ -318,10 +318,12 @@ class TradingBot:
         # Layer 2: Sentiment confirmation (applied only to BUY/SELL signals)
         sent_score = 0.0
         sent_label = "Neutral"
+        # Bind unconditionally — the LLM-review block below also references
+        # symbol_raw, and it runs even when sentiment is disabled. Assigning it
+        # only inside the sentiment branch caused an UnboundLocalError that
+        # silently disabled LLM review every cycle.
+        symbol_raw = ta.get("symbol", ta.get("close_symbol", "")) or "BTC"
         if self.config.get("sentiment", {}).get("enabled", False):
-            symbol_raw = ta.get("symbol", ta.get("close_symbol", ""))
-            if not symbol_raw:
-                symbol_raw = "BTC"
             coin_symbol = symbol_raw.split("/")[0] if "/" in symbol_raw else symbol_raw
 
             adj_sig, adj_conf, sent_reason = self.sentiment.get_signal_filter(
@@ -517,6 +519,34 @@ class TradingBot:
             if price <= 0:
                 decision["signal"] = "HOLD"
                 decision["reason"] += " | InvalidPrice"
+                return decision
+
+            # Safety: the entry price (derived from OHLCV) must agree with the
+            # live ticker before we open. A stale/mismatched OHLCV candle would
+            # otherwise open at a phantom price and get stopped out instantly at
+            # the true market — the 2026-06-05 real-money incident. Abort on
+            # divergence beyond tolerance.
+            try:
+                live_price = self.collector.get_current_price(symbol)
+            except Exception:
+                live_price = None
+            if not live_price:
+                # Fail-open (the collector's candle-staleness check is the other
+                # guard layer), but make it visible — we opened without the live
+                # cross-check.
+                self.log.warning(
+                    f"[{symbol}] live ticker unavailable — opening at OHLCV "
+                    f"price {price:.2f} without divergence cross-check"
+                )
+            if live_price and abs(live_price - price) / live_price > 0.02:
+                self.log.error(
+                    f"[{symbol}] OHLCV/ticker price divergence: entry={price:.2f} "
+                    f"vs live={live_price:.2f} "
+                    f"({abs(live_price - price) / live_price * 100:.1f}%) — skipping"
+                )
+                decision["signal"] = "HOLD"
+                decision["confidence"] = 0.0
+                decision["reason"] += " | PriceDivergence"
                 return decision
 
             # Risk-adjusted position sizing — use pair's allocated capital

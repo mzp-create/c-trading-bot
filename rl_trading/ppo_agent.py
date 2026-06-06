@@ -369,7 +369,10 @@ class PPOAgent:
     
     def load(self, path: str):
         """Load model checkpoint"""
-        checkpoint = torch.load(path, map_location=self.device)
+        # weights_only=True: model files are auto-discovered from a directory; a
+        # poisoned .pt must not be able to execute arbitrary code on load. We only
+        # read plain state_dict tensors + an int below, so this is safe.
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
         self.network.load_state_dict(checkpoint['network_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.training_step = checkpoint.get('training_step', 0)

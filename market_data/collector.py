@@ -32,15 +32,21 @@ class MarketDataCollector:
         and ``config["exchange"]`` for exchange settings.
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, mode: Optional[str] = None):
         self.config = config
         self._log = logging.getLogger(f"{__name__}.MarketDataCollector")
 
-        # Resolve exchange mode
-        mode = "live"
-        if config.get("exchange", {}).get("testnet", True):
-            mode = "paper"
-        mode = config.get("trading", {}).get("mode", mode)
+        # Resolve exchange mode. The caller's explicit `mode` (the authoritative
+        # CLI --mode, threaded from the bot) takes precedence; we only derive it
+        # from config when not given. Deriving from `exchange.testnet` alone is
+        # unsafe: configs ship testnet=false for live, so a paper run would
+        # otherwise build a LIVE authenticated client (and claim the live API key
+        # in the registry) — a paper/live isolation leak.
+        if mode is None:
+            mode = "live"
+            if config.get("exchange", {}).get("testnet", True):
+                mode = "paper"
+            mode = config.get("trading", {}).get("mode", mode)
 
         self._client: BitfinexClient = BitfinexClient(
             config, mode=mode, instance=config.get("instance", "default")
@@ -268,6 +274,29 @@ class MarketDataCollector:
             for col in ("open", "high", "low", "close", "volume"):
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
+            # Reject if the newest CANDLE is itself stale. File mtime alone is
+            # not enough: a re-written file can still hold days-old candles,
+            # which would feed a phantom entry/SL price (root cause of the
+            # 2026-06-05 stale-position incident). The index is epoch-ms.
+            if df.index.size:
+                try:
+                    last_ts_ms = int(pd.to_numeric(df.index, errors="coerce").max())
+                    candle_age_s = time.time() - last_ts_ms / 1000.0
+                    if candle_age_s > max_age:
+                        self._log.warning(
+                            "Cache candle stale for %s (newest candle age=%.0fs,"
+                            " max=%.0fs) — forcing refresh",
+                            path.name, candle_age_s, max_age,
+                        )
+                        return None
+                except (ValueError, TypeError) as exc:
+                    # Index wasn't epoch-ms numeric (unexpected cache format) —
+                    # skip the candle-age check rather than crash. Log so a silent
+                    # format drift doesn't quietly disable this staleness guard.
+                    self._log.debug(
+                        "Candle-age staleness check skipped for %s: %s",
+                        path.name, exc,
+                    )
             self._log.debug("Loaded cached %s (age=%.0fs)", path.name, cache_age_s)
             return df
         except (pd.errors.EmptyDataError, ValueError, KeyError) as exc:

@@ -25,6 +25,22 @@ echo "Hermes Dual-Instance Trading Bot"
 echo "Mode: ${MODE^^}"
 echo "=========================================="
 
+# Verify an instance is still alive a moment after launch. A fail-fast exit
+# (e.g. KeyConflictError on a duplicate live key, or a bad config) must NOT be
+# reported as "started successfully".
+check_started() {
+    local name="$1" pid="$2" log="$3"
+    sleep 2
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        echo "  ✗ $name instance (PID ${pid:-?}) exited immediately — check $log"
+        echo "    ---- last 20 lines of $log ----"
+        tail -n 20 "$log" 2>/dev/null || true
+        return 1
+    fi
+    echo "  ✓ $name instance healthy (PID $pid)"
+    return 0
+}
+
 # Create instance directories
 mkdir -p instances/long/{data/{ohlcv,models},logs}
 mkdir -p instances/short/{data/{ohlcv,models},logs}
@@ -64,8 +80,9 @@ echo "Starting LONG instance..."
 )
 LONG_PID=$(cat instances/long/pid)
 echo "  ✓ Long bot PID: $LONG_PID"
-echo "  ✓ Logs: instances/long/logs/bot.log"
+echo "  ✓ Logs: instances/long/logs/stdout.log"
 echo "  ✓ Data: instances/long/data/"
+check_started "LONG" "$LONG_PID" "instances/long/logs/stdout.log" || FAILED=1
 
 echo ""
 echo "Starting SHORT instance..."
@@ -79,8 +96,17 @@ echo "Starting SHORT instance..."
 )
 SHORT_PID=$(cat instances/short/pid)
 echo "  ✓ Short bot PID: $SHORT_PID"
-echo "  ✓ Logs: instances/short/logs/bot.log"
+echo "  ✓ Logs: instances/short/logs/stdout.log"
 echo "  ✓ Data: instances/short/data/"
+check_started "SHORT" "$SHORT_PID" "instances/short/logs/stdout.log" || FAILED=1
+
+if [ "${FAILED:-0}" = "1" ]; then
+    echo ""
+    echo "=========================================="
+    echo "⚠️  One or more instances FAILED to start — see logs above."
+    echo "=========================================="
+    exit 1
+fi
 
 echo ""
 echo "=========================================="
@@ -88,8 +114,8 @@ echo "Both instances started successfully!"
 echo "=========================================="
 echo ""
 echo "Monitor commands:"
-echo "  Long bot:   tail -f instances/long/logs/bot.log"
-echo "  Short bot:  tail -f instances/short/logs/bot.log"
+echo "  Long bot:   tail -f instances/long/logs/stdout.log"
+echo "  Short bot:  tail -f instances/short/logs/stdout.log"
 echo ""
 echo "Status:       ./status_dual.sh"
 echo "Stop:         ./stop_dual.sh"

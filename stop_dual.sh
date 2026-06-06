@@ -14,6 +14,14 @@ stop_instance() {
     if [ -f "$pid_file" ]; then
         PID=$(cat "$pid_file")
         if kill -0 "$PID" 2>/dev/null; then
+            # Guard against PID recycling: only kill if this PID is actually our
+            # bot. A stale pid file pointing at a reused PID could otherwise kill
+            # an unrelated process. The pkill fallback below still catches us.
+            if ! ps -p "$PID" -o args= 2>/dev/null | grep -qE "main\.py.*--instance $instance"; then
+                echo "  PID $PID is not the $instance bot (recycled?) — skipping direct kill"
+                rm -f "$pid_file"
+                return
+            fi
             echo "Stopping $instance instance (PID: $PID)..."
             kill "$PID"
             sleep 2
@@ -37,8 +45,8 @@ stop_instance "short"
 # Clean up any remaining processes
 echo ""
 echo "Cleaning up remaining processes..."
-pkill -f "main.py --instance long" 2>/dev/null || true
-pkill -f "main.py --instance short" 2>/dev/null || true
+pkill -f "main.py.*--instance long" 2>/dev/null || true
+pkill -f "main.py.*--instance short" 2>/dev/null || true
 
 echo ""
 echo "=========================================="

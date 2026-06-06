@@ -51,12 +51,18 @@ STATIC_DIR = HERE / "static"
 # ---------------------------------------------------------------------------
 DASHBOARD_PASSWORD = secrets.token_urlsafe(24)  # 192-bit random password (P3-19)
 PASSWORD_FILE = HERE / ".dashboard_password"
-with open(PASSWORD_FILE, "w") as f:
+# Write 0600: this value is BOTH the Basic-auth password AND the HMAC secret for
+# every session cookie / login token, so it must not be world-readable. Use
+# os.open with an explicit mode (umask-independent) and truncate any prior file.
+_fd = os.open(PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(_fd, "w") as f:
     f.write(f"DASHBOARD_PASSWORD={DASHBOARD_PASSWORD}\n")
+# Tighten perms even if the file pre-existed with looser mode.
+os.chmod(PASSWORD_FILE, 0o600)
+# Do NOT print the secret — it would leak into console/systemd/journald logs.
 print(f"\n{'='*60}")
 print(f"  🌐 Dashboard: http://localhost:8999")
-print(f"  🔑 Password:  {DASHBOARD_PASSWORD}")
-print(f"  📁 Saved to:  {PASSWORD_FILE}")
+print(f"  🔑 Password saved to (0600): {PASSWORD_FILE}")
 print(f"{'='*60}\n")
 
 security = HTTPBasic(auto_error=False)
@@ -347,6 +353,10 @@ def login(request: Request, token: str = ""):
     # Mark the session cookie Secure when the request actually arrived over
     # HTTPS (so it is never sent in cleartext), while still working on plain
     # http://localhost for local use. Honors a proxy's X-Forwarded-Proto.
+    # NOTE: a remote, plain-HTTP (no TLS terminator) deployment will ship this
+    # 8h session bearer in cleartext — terminate HTTPS at a proxy for any
+    # internet exposure. (Left as-is to preserve plain-HTTP LAN support, which
+    # tests/test_dashboard_login.py deliberately exercises.)
     is_https = request.url.scheme == "https" or \
         request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
     resp.set_cookie(
