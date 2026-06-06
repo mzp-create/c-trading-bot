@@ -455,11 +455,14 @@ class TradingBot:
         except Exception:
             live_price = None
         if not live_price:
+            # Fail CLOSED on entry: with no live ticker we cannot rule out a
+            # stale/phantom OHLCV price (the 2026-06-05 incident). Block the
+            # entry rather than open blind. (Exits/SL-TP do not use this guard.)
             self.log.warning(
-                f"[{symbol}] live ticker unavailable — opening at OHLCV "
-                f"price {price:.2f} without divergence cross-check"
+                f"[{symbol}] live ticker unavailable — BLOCKING entry "
+                f"(cannot cross-check OHLCV price {price:.2f})"
             )
-            return False
+            return True
         if abs(live_price - price) / live_price > self._PRICE_DIVERGENCE_TOL:
             self.log.error(
                 f"[{symbol}] OHLCV/ticker price divergence: entry={price:.2f} "
@@ -576,6 +579,23 @@ class TradingBot:
                 decision["signal"] = "HOLD"
                 decision["confidence"] = 0.0
                 decision["reason"] += " | PriceDivergence"
+                return decision
+
+            # Portfolio exposure cap — enforce max_open_positions and never stack
+            # a second position on a symbol already held. max_open_positions was
+            # declared in every config but NEVER enforced, so cycles could open
+            # unbounded/repeat exposure.
+            open_positions = self.executor.open_positions
+            held_symbols = {p.get('symbol') for p in open_positions}
+            max_open = int(self.config.get('trading', {}).get('max_open_positions', 3))
+            if symbol in held_symbols:
+                decision["signal"] = "HOLD"
+                decision["reason"] += " | AlreadyHolding"
+                return decision
+            if len(open_positions) >= max_open:
+                self.log.info(f"[{symbol}] Max open positions ({max_open}) reached — skipping")
+                decision["signal"] = "HOLD"
+                decision["reason"] += " | MaxPositions"
                 return decision
 
             # Risk-adjusted position sizing — use pair's allocated capital
@@ -730,12 +750,13 @@ class TradingBot:
         cycle_count = 0
         while self.running:
             try:
+                # Daily reset runs even while paused, so a new day can clear a
+                # daily-loss-breaker pause (otherwise the pause would be permanent).
+                self._check_daily_reset()
+
                 if self.paused:
                     time.sleep(5)
                     continue
-
-                # Check for daily reset
-                self._check_daily_reset()
 
                 # Trade cycle for EACH symbol
                 cycle_results = []
@@ -844,7 +865,16 @@ class TradingBot:
                     # Use REALIZED pnl from the close order.
                     pnl = float(close_result.get('pnl', 0.0))
                     self.daily_pnl += pnl
-                    self.consecutive_losses = self.consecutive_losses + 1 if pnl < 0 else 0
+                    # Feed the RiskManager so its consecutive-loss breaker AND
+                    # cooldown-after-loss actually arm (previously dead code —
+                    # record_loss/record_win were never called, so the breaker
+                    # could never trip).
+                    if pnl < 0:
+                        self.consecutive_losses += 1
+                        self.risk.record_loss()
+                    else:
+                        self.consecutive_losses = 0
+                        self.risk.record_win()
 
                     emoji = "🟢" if pnl > 0 else "🔴"
                     msg = (f"{emoji} **Position Closed**\n"
@@ -869,6 +899,25 @@ class TradingBot:
         self.log.info(f"Daily PnL: ${self.daily_pnl:.2f} | Open: {open_count} | "
                      f"Trades: {self.trade_count}")
 
+        # Daily-loss circuit breaker: when the loss limit is breached, don't just
+        # block new entries — FLATTEN open positions and pause, so a bad day
+        # can't keep bleeding through still-open positions.
+        max_daily_loss = abs(float(self.config.get('risk', {}).get('max_daily_loss', 20.0)))
+        if not self.paused and self.daily_pnl <= -max_daily_loss:
+            self.log.error(
+                f"DAILY LOSS LIMIT BREACHED: ${self.daily_pnl:.2f} <= -${max_daily_loss:.2f}"
+                f" — flattening all positions and pausing until daily reset."
+            )
+            try:
+                self.executor.close_all_positions()
+            except Exception as exc:
+                self.log.error(f"close_all_positions during breaker failed: {exc}")
+            self.paused = True
+            self.telegram.send(
+                f"🛑 **Daily loss limit hit** (${self.daily_pnl:+.2f}). "
+                f"Positions flattened, trading paused until daily reset."
+            )
+
     def _check_daily_reset(self):
         """Reset daily counters using date comparison (P1-9)."""
         today = datetime.now().date()
@@ -887,6 +936,15 @@ class TradingBot:
             self.daily_pnl = 0.0
             self.trade_count = 0
             self.consecutive_losses = 0
+            # Clear a daily-loss-breaker pause and reset the RiskManager's
+            # consecutive-loss/cooldown state so trading re-arms for the new day.
+            if self.paused:
+                self.paused = False
+                self.log.info("Daily reset — clearing daily-loss-breaker pause")
+            try:
+                self.risk.reset()
+            except Exception:
+                pass
             self._last_reset_date = today
             self.log.info(f"Daily counters reset ({today.isoformat()})")
 

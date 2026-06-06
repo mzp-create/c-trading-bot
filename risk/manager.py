@@ -305,8 +305,18 @@ class RiskManager:
         # --- Trailing stop ---
         trailing = position.get("trailing_stop", False)
         if trailing:
-            new_stop = self.get_trailing_stop(entry, current_price, side, self.risk_config)
-            # Update position with new trailing stop
+            computed = self.get_trailing_stop(entry, current_price, side, self.risk_config)
+            old_stop = float(position.get("stop_loss", 0) or 0)
+            # RATCHET ONLY: a trailing stop must never move AGAINST the position.
+            # For a long it can only rise; for a short it can only fall. The old
+            # code overwrote the stop with `computed` every cycle, so a price
+            # retrace LOOSENED the stop (gave back profit / could fall below the
+            # original stop) — the trailing-stop ratchet bug. The stored stop is
+            # the ratchet state (persisted via RiskState write-back).
+            if old_stop > 0:
+                new_stop = max(old_stop, computed) if side == "buy" else min(old_stop, computed)
+            else:
+                new_stop = computed
             position["stop_loss"] = new_stop
             return {
                 "closed": False,

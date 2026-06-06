@@ -51,13 +51,14 @@ def test_ok_within_tolerance():
     assert _bot(101.0)._price_diverges_from_live("BTC/USDT", 100.0) is False
 
 
-def test_fails_open_when_ticker_unavailable():
-    # No live price -> fail OPEN (allow the entry) but do not crash.
-    assert _bot(None)._price_diverges_from_live("BTC/USDT", 100.0) is False
+def test_fails_closed_when_ticker_unavailable():
+    # No live price -> fail CLOSED on entry (block) so we never open against a
+    # possibly-stale OHLCV price. Returns True (= diverges/blocked), no crash.
+    assert _bot(None)._price_diverges_from_live("BTC/USDT", 100.0) is True
 
 
-def test_fails_open_on_ticker_exception():
-    assert _bot(RuntimeError("boom"))._price_diverges_from_live("BTC/USDT", 100.0) is False
+def test_fails_closed_on_ticker_exception():
+    assert _bot(RuntimeError("boom"))._price_diverges_from_live("BTC/USDT", 100.0) is True
 
 
 def test_tolerance_boundary_just_over():
