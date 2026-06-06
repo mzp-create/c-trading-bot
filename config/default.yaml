@@ -21,7 +21,8 @@ trading:
   max_risk_per_trade: 0.02  # 2% max risk per trade
   max_open_positions: 6  # 2 per pair max
   position_size_mode: "dynamic"  # fixed, dynamic, kelly
-  min_position_value_usd: 50.0  # Minimum $50 per trade (no micro-positions)
+  min_position_value_usd: 15.0  # Floor just above Bitfinex minimums (was $50,
+  # which silently skipped risk-correct low-confidence trades — see long.yaml).
 
 exchange:
   name: "bitfinex"        # CCXT bitfinex with automatic nonce handling
