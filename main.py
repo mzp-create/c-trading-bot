@@ -1023,13 +1023,21 @@ def main():
                        default='default', help='Trading instance type (long=only BUY, short=only SELL)')
     args = parser.parse_args()
 
+    if args.mode == 'backtest':
+        # Backtest does NOT need the live TradingBot (exchange keys, telegram,
+        # WS feed). Build the engine straight from the resolved config so a
+        # backtest can run with no API credentials / no network auth.
+        from backtest.engine import BacktestEngine
+        cfg = load_config(args.config)
+        if args.capital is not None:
+            cfg.setdefault('trading', {})['initial_capital'] = args.capital
+        engine = BacktestEngine(cfg)
+        engine.run()
+        return
+
     bot = TradingBot(config_path=args.config, mode=args.mode, instance=args.instance)
 
-    if args.mode == 'backtest':
-        from backtest.engine import BacktestEngine
-        engine = BacktestEngine(bot.config)
-        engine.run()
-    elif args.mode == 'monitor':
+    if args.mode == 'monitor':
         from monitoring.dashboard import Dashboard
         dash = Dashboard(bot.config)
         dash.run()

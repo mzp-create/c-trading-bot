@@ -36,3 +36,7 @@ data/.bfx_nonce_shared
 data/.bfx_nonce
 instances/
 data/models/
+
+# backtest data/cache artifacts
+backtest/data/
+backtest/__pycache__/
