@@ -56,17 +56,31 @@ class StrategySelector:
             "grid": GridStrategy(self.strategies_config),
         }
         
-        # Add ensemble strategy if available
-        if ENSEMBLE_AVAILABLE:
+        # Ensemble is per-symbol (each symbol uses its own ML/RL model) and is
+        # built lazily on first use — see _get_ensemble. Building one instance
+        # for symbols[0] and running it on every symbol would feed the wrong
+        # model the wrong data.
+        self._ensemble_config = self.strategies_config.get("ensemble", {})
+        self._ensembles: Dict[str, Any] = {}
+        self._default_symbol = (
+            config.get("trading", {}).get("symbols", [{}]) or [{}]
+        )[0].get("name", "BTC/USDT")
+
+    def _get_ensemble(self, symbol: str):
+        """Lazily build and cache the ensemble for `symbol` so each symbol uses
+        its own model. Returns None if ensembles are unavailable or fail to
+        load (the bot then runs without the ensemble vote)."""
+        if not ENSEMBLE_AVAILABLE:
+            return None
+        if symbol not in self._ensembles:
             try:
-                symbol = config.get("trading", {}).get("symbols", [{}])[0].get("name", "BTC/USDT")
-                self._strategies["ensemble"] = EnsembleStrategy(
-                    symbol=symbol,
-                    config=self.strategies_config.get("ensemble", {})
-                )
-                self._log.info("✅ Ensemble strategy loaded")
+                self._ensembles[symbol] = EnsembleStrategy(
+                    symbol=symbol, config=self._ensemble_config)
+                self._log.info("✅ Ensemble loaded for %s", symbol)
             except Exception as e:
-                self._log.warning(f"⚠️ Failed to load ensemble strategy: {e}")
+                self._log.warning("⚠️ Ensemble load failed for %s: %s", symbol, e)
+                self._ensembles[symbol] = None
+        return self._ensembles[symbol]
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -81,6 +95,7 @@ class StrategySelector:
                 enabled.append({
                     "name": name,
                     "weight": float(scfg.get("weight", 0.25)),
+                    "shadow": bool(scfg.get("shadow", False)),
                     "params": {k: v for k, v in scfg.items() if k not in ("enabled", "weight")},
                 })
         return enabled
@@ -91,22 +106,36 @@ class StrategySelector:
         ta_5m: dict,
         ta_15m: dict,
         ml_signal: dict,
+        symbol: Optional[str] = None,
+        df_1h: Optional["pd.DataFrame"] = None,
     ) -> List[Dict[str, Any]]:
         """Return list of signal dicts from each enabled strategy.
-        
-        Signals are filtered by trade_direction if set.
+
+        Signals are filtered by trade_direction if set. `symbol`/`df_1h` route
+        the real OHLCV window to the per-symbol ensemble; the classic strategies
+        consume only the flattened TA dicts.
         """
         signals = []
+        symbol = symbol or self._default_symbol
         for entry in self.get_enabled_strategies():
             name = entry["name"]
-            strategy = self._strategies.get(name)
-            if strategy is None:
-                self._log.warning("Unknown strategy '%s' — skipping", name)
-                continue
+            shadow = entry.get("shadow", False)
             try:
-                signal = strategy.generate(ta_1h, ta_5m, ta_15m, ml_signal)
+                if name == "ensemble":
+                    strat = self._get_ensemble(symbol)
+                    if strat is None:
+                        continue
+                    signal = strat.generate(ta_1h, ta_5m, ta_15m, ml_signal,
+                                            df_1h=df_1h)
+                else:
+                    strategy = self._strategies.get(name)
+                    if strategy is None:
+                        self._log.warning("Unknown strategy '%s' — skipping", name)
+                        continue
+                    signal = strategy.generate(ta_1h, ta_5m, ta_15m, ml_signal)
                 signal["name"] = name
                 signal["weight"] = entry["weight"]
+                signal["shadow"] = shadow
                 # Apply direction filtering
                 signal = self._filter_by_direction(signal)
                 signals.append(signal)
@@ -117,6 +146,7 @@ class StrategySelector:
                     "signal": "HOLD",
                     "confidence": 0.0,
                     "weight": entry["weight"],
+                    "shadow": shadow,
                     "reason": f"Error: {exc}",
                     "params": entry["params"],
                 })

@@ -235,11 +235,12 @@ class TradingBot:
         ml_signal = self.ml_predictor.predict(df_1h, symbol=symbol)
         ml_signal_5m = self.ml_predictor.predict(df_5m, symbol=symbol)
 
-        # 4. Get strategy signals
-        strategy_signals = self.strategies.get_signals(ta_1h, ta_5m, ta_15m, ml_signal)
+        # 4. Get strategy signals (pass real 1h OHLCV so the ensemble can run)
+        strategy_signals = self.strategies.get_signals(
+            ta_1h, ta_5m, ta_15m, ml_signal, symbol=symbol, df_1h=df_1h)
 
         # 5. Combine into final decision
-        final = self._combine_signals(strategy_signals, ml_signal, ta_1h)
+        final = self._combine_signals(strategy_signals, ml_signal, ta_1h, symbol=symbol)
         final['symbol'] = symbol
 
         # Log analysis summary
@@ -248,7 +249,8 @@ class TradingBot:
 
         return final
 
-    def _combine_signals(self, strategy_signals: dict, ml_signal: dict, ta: dict) -> Dict:
+    def _combine_signals(self, strategy_signals: dict, ml_signal: dict, ta: dict,
+                         symbol: str = "") -> Dict:
         """Weighted signal combination."""
         weights = {
             s['name']: s.get('weight', 0.25)
@@ -261,6 +263,19 @@ class TradingBot:
         reasons = []
 
         for sig in strategy_signals:
+            # Shadow strategies are observed only — logged + recorded, but never
+            # added to the score, so they cannot move a trade decision.
+            if sig.get('shadow'):
+                self.log.info(
+                    f"[{symbol or sig.get('name')}] SHADOW {sig.get('name')}: "
+                    f"{sig.get('signal', 'HOLD')} conf={sig.get('confidence', 0.0):.2f} "
+                    f"— observed, not trading"
+                )
+                reasons.append(
+                    f"SHADOW:{sig.get('name')}:{sig.get('signal', 'HOLD')}"
+                    f"({sig.get('confidence', 0.0):.2f})"
+                )
+                continue
             w = weights.get(sig['name'], 0.25)
             total_weight += w
             if sig['signal'] == 'BUY':

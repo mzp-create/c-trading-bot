@@ -60,13 +60,17 @@ exchange:
   api_secret: "${BITFINEX_LONG_API_SECRET}"
 
 strategies:
-  enabled: ["trend_following"]
+  enabled: ["ensemble", "trend_following"]
 
   # Ensemble strategy (ML + RL) - LONG only
-  # DISABLED: inert on the live path (1-row DataFrame -> always HOLD). Re-enable
-  # only after wiring real OHLCV through generate(). See PR review Phase C.
+  # SHADOW MODE: runs on real OHLCV and is logged/recorded every cycle, but does
+  # NOT affect trade decisions (shadow:true). Observe it before activating. To
+  # activate, set shadow:false and give it a weight. NOTE: feature normalization
+  # + reward are unchanged (the trained model depends on them) — see PR review
+  # "Group B" before trusting it live.
   ensemble:
-    enabled: false
+    enabled: true
+    shadow: true
     ml_weight: 0.4
     rl_weight: 0.6
     confidence_threshold: 0.15

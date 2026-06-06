@@ -170,49 +170,61 @@ class EnsembleBotStrategy:
         ta_5m: dict,
         ta_15m: dict,
         ml_signal: dict,
+        df_1h: "pd.DataFrame" = None,
     ) -> Dict[str, Any]:
         """
         Generate signal from ensemble - compatible with StrategySelector interface
-        
+
         Args:
             ta_1h: 1h timeframe technical analysis data
-            ta_5m: 5m timeframe technical analysis data  
+            ta_5m: 5m timeframe technical analysis data
             ta_15m: 15m timeframe technical analysis data
             ml_signal: ML predictor signal
-        
+            df_1h: the real 1h OHLCV window. REQUIRED for a real signal — the
+                ensemble's analyze() needs >=50 rows. Without it we fall back to
+                a 1-row stub that always yields HOLD (kept only for back-compat).
+
         Returns:
-            Signal dict with signal, confidence, reason, params
+            Signal dict with signal, confidence, reason, params. `signal` is
+            normalized to BUY/SELL/HOLD — the ensemble's CLOSE (and any other
+            exit/short action) maps to HOLD because this bot consumes strategy
+            output only as an entry-direction vote; exits/sizing are owned by the
+            risk and SL/TP layers.
         """
-        # Build market data DataFrame from TA data
         if not ta_1h:
             return self._hold("No 1h TA data")
-        
+
         try:
-            # Create minimal DataFrame from TA data
             import pandas as pd
-            data = {
-                'open': [ta_1h.get('open', ta_1h.get('close', 0))],
-                'high': [ta_1h.get('high', ta_1h.get('close', 0))],
-                'low': [ta_1h.get('low', ta_1h.get('close', 0))],
-                'close': [ta_1h.get('close', 0)],
-                'volume': [ta_1h.get('volume', 0)]
-            }
-            df = pd.DataFrame(data)
-            
-            # Get signal from ensemble
+            if df_1h is not None and len(df_1h) >= 50:
+                market_data = df_1h
+            else:
+                # Fallback stub — analyze() will short-circuit to HOLD.
+                market_data = pd.DataFrame({
+                    'open': [ta_1h.get('open', ta_1h.get('close', 0))],
+                    'high': [ta_1h.get('high', ta_1h.get('close', 0))],
+                    'low': [ta_1h.get('low', ta_1h.get('close', 0))],
+                    'close': [ta_1h.get('close', 0)],
+                    'volume': [ta_1h.get('volume', 0)],
+                })
+
             signal = self.analyze(
                 current_price=ta_1h.get('close', 0),
                 position=None,
-                market_data=df
+                market_data=market_data,
             )
-            
+
+            sig = signal.get('signal', 'HOLD')
+            if sig not in ('BUY', 'SELL'):
+                sig = 'HOLD'
+
             return {
-                'signal': signal.get('signal', 'HOLD'),
+                'signal': sig,
                 'confidence': signal.get('confidence', 0.0),
                 'reason': signal.get('reason', 'Ensemble analysis'),
-                'params': signal.get('metadata', {})
+                'params': signal.get('metadata', {}),
             }
-            
+
         except Exception as e:
             self.log.error(f"Ensemble generate error: {e}")
             return self._hold(f"Error: {e}")

@@ -41,16 +41,17 @@ exchange:
   api_secret: "${BITFINEX_API_SECRET}"  # Set via env var
 
 strategies:
-  enabled: ["trend_following", "grid"]
+  enabled: ["ensemble", "trend_following", "grid"]
 
   # Ensemble strategy (ML + RL)
-  # DISABLED: the live entrypoint (EnsembleBotStrategy.generate) feeds a 1-row
-  # DataFrame, so analyze() always returns HOLD (needs >=50 rows). It loaded
-  # models and looked active (rl_weight 0.6) but never traded. Re-enable only
-  # after wiring the real cached OHLCV DataFrame through get_signals/generate
-  # and fixing the RL train/infer divergence. See PR review remediation Phase C.
+  # SHADOW MODE: runs on real OHLCV and is logged/recorded every cycle, but does
+  # NOT affect trade decisions (shadow:true). Observe it before activating. To
+  # activate, set shadow:false and give it a weight. NOTE: feature normalization
+  # + reward are unchanged (the trained model depends on them) — see PR review
+  # "Group B" before trusting it live.
   ensemble:
-    enabled: false
+    enabled: true
+    shadow: true
     ml_weight: 0.4
     rl_weight: 0.6
     confidence_threshold: 0.15  # Lower for new models

@@ -305,8 +305,10 @@ class RLStrategy:
             return confidence
         except Exception as e:
             self.log.warning(f"Could not calculate softmax confidence: {e}")
-            # Fallback to exp(log_prob)
-            return float(np.exp(action))
+            # `action` is an integer action index, not a log-prob — exp(action)
+            # would return absurd values (e.g. e^14 ≈ 1.2M). Fall back to a
+            # neutral 0.0 so a confidence-failure can never inflate a signal.
+            return 0.0
     
     def update_position(self, side: Optional[str], size: float, price: float):
         """Update tracked position state"""
