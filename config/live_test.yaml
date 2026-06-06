@@ -1,0 +1,117 @@
+# SUPERVISED LIVE TEST config — tight risk caps for a short, watched live run.
+# NOT for normal operation. Derived from config/long.yaml.
+#   python3 main.py --mode live --instance long --config config/live_test.yaml
+# Caps: 1 symbol (BTC), ~$10 max position (capital 50 * max_single_pct 0.20 *
+# leverage 1.0), $3 daily-loss breaker, 1 open position, ensemble stays SHADOW.
+
+trading:
+  instance: "long"
+  trade_direction: "long"        # BUY-only entries
+
+  symbols:
+    - name: "BTC/USDT"
+      symbol: "tBTCUST"
+      allocation_pct: 100.0
+      enabled: true
+
+  initial_capital: 50.0          # bounds position size (NOT the real wallet)
+  daily_target: 5.0
+  max_risk_per_trade: 0.01       # 1% risked per trade
+  max_open_positions: 1
+  position_size_mode: "dynamic"
+  min_position_value_usd: 6.0    # allow a tiny test position
+
+exchange:
+  name: "bitfinex"
+  testnet: false
+  rate_limit: 1.0
+  trust_exchange_positions: false
+  ws_reconnect_delay: 5
+  ws:
+    enabled: true
+    wss_host: "wss://api.bitfinex.com/ws/2"
+    ticker_staleness_seconds: 15
+    order_confirm_timeout_seconds: 10
+    reconcile_interval_seconds: 90
+  default_type: "margin"
+  api_key: "${BITFINEX_LONG_API_KEY}"
+  api_secret: "${BITFINEX_LONG_API_SECRET}"
+
+strategies:
+  enabled: ["ensemble", "trend_following"]
+  ensemble:
+    enabled: true
+    shadow: true                 # observed only — never trades
+    ml_weight: 0.4
+    rl_weight: 0.6
+    confidence_threshold: 0.15
+    agreement_required: false
+    use_dynamic_sizing: true
+    max_position_pct: 0.95
+    long_only: true
+  trend_following:
+    enabled: true
+    weight: 0.4
+    timeframe: "1h"
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+
+ml:
+  enabled: true
+  model_type: "xgboost"
+  features: ["rsi", "macd", "bb_upper", "bb_lower", "ema_9", "ema_21",
+             "volume_sma", "price_change_1h", "price_change_4h", "volatility"]
+  lookback: 48
+  retrain_interval: 24
+  min_train_samples: 100
+
+regime_detector:
+  enabled: true
+  adx_trending_threshold: 25
+  adx_ranging_threshold: 20
+  volatility_ratio_threshold: 1.5
+  lookback: 50
+  trend_lookback: 14
+  max_correlation: 0.7
+  regime_params:
+    TRENDING: {stop_loss_mult: 1.2, take_profit_mult: 1.5, position_size_mult: 1.0}
+    RANGING:  {stop_loss_mult: 0.8, take_profit_mult: 0.7, position_size_mult: 0.8}
+    VOLATILE: {stop_loss_mult: 1.5, take_profit_mult: 1.0, position_size_mult: 0.5}
+
+sentiment:
+  enabled: false
+
+risk:
+  leverage: 1.0                  # no margin multiplier for the test
+  max_daily_loss: 3.0            # tight circuit breaker (~$3)
+  max_drawdown_pct: 8.0
+  max_single_pct: 0.20           # cap = 50 * 0.20 * 1.0 = $10 max position
+  stop_loss_pct: 2.0
+  take_profit_pct: 4.0
+  trailing_stop: true
+  trailing_stop_activation: 2.0
+  trailing_stop_distance: 0.5
+  cooldown_after_loss: 300
+
+monitoring:
+  log_level: "INFO"
+  save_trades: true
+  save_equity_curve: true
+  telegram_alerts: true
+  telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
+  telegram_chat_id: "${TELEGRAM_CHAT_ID}"
+  alert_on_trade: true
+  alert_on_drawdown: true
+  daily_summary: true
+  instance_prefix: "🧪 LIVETEST"
+
+data:
+  ohlcv_dir: "instances/live_test/data/ohlcv/"
+  models_dir: "instances/live_test/data/models/"
+  trades_file: "instances/live_test/data/trades.csv"
+  db_file: "instances/live_test/data/trading.db"
+  equity_file: "instances/live_test/data/equity.csv"
+  log_file: "instances/live_test/logs/bot.log"
