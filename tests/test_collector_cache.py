@@ -16,7 +16,7 @@ class _FakeClient:
     """Stand-in for BitfinexClient that records the mode it was built with and
     makes no network calls / key registrations."""
 
-    def __init__(self, config, mode=None, instance=None):
+    def __init__(self, config, mode=None, instance=None, enable_ws=True):
         self.config = config
         self.mode = mode
         self.instance = instance
@@ -89,7 +89,7 @@ def test_ohlcv_since_window_ends_near_now(monkeypatch, tmp_path):
     captured = {}
 
     class _CaptureClient:
-        def __init__(self, config, mode=None, instance=None):
+        def __init__(self, config, mode=None, instance=None, enable_ws=True):
             pass
 
         def get_ohlcv(self, symbol, timeframe, limit, since=None):

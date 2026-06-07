@@ -48,8 +48,12 @@ class MarketDataCollector:
                 mode = "paper"
             mode = config.get("trading", {}).get("mode", mode)
 
+        # The collector only needs public candles (OhlcvFetcher) and REST ticker,
+        # so it must NOT open an authenticated WS feed: a second auth WS on the
+        # shared API key is the nonce-collision surface (see 2026-06-07 incident).
         self._client: BitfinexClient = BitfinexClient(
-            config, mode=mode, instance=config.get("instance", "default")
+            config, mode=mode, instance=config.get("instance", "default"),
+            enable_ws=False,
         )
 
         # Cache directory

@@ -26,7 +26,7 @@ KEY_REGISTRY_PATH = "data/.bfx_key_registry.json"
 
 class BitfinexClient:
     def __init__(self, config: dict, mode: str = "paper",
-                 instance: str = "default"):
+                 instance: str = "default", enable_ws: bool = True):
         self.mode = mode
         self.instance = instance
         self._ohlcv = OhlcvFetcher()
@@ -49,7 +49,7 @@ class BitfinexClient:
             self._auth = BfxRest(api_key=api_key, api_secret=api_secret)
             self._ticker_source = self._auth
             ws_cfg = ex.get("ws", {})
-            if ws_cfg.get("enabled", True):
+            if enable_ws and ws_cfg.get("enabled", True):
                 self._start_ws(config, api_key, api_secret, ws_cfg)
                 atexit.register(self.close)
         else:
