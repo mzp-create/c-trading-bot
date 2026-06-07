@@ -21,6 +21,21 @@ Built the previously-missing backtest engine (`backtest/engine.py`, run via `pyt
 
 The strategy (EMA9/21 + RSI trend-follow + XGBoost weighting) gets whipsawed: ~9× more stop-outs than targets. ML accuracy is modest (BTC 0.79, SOL 0.60). **This is a no-edge problem, not a config-tuning problem.** Caveat: one market regime / ~4 months; directionally damning, not a multi-year proof.
 
+### Edge probe — every lever still loses (confirms no edge)
+`backtest/probe.py` tested the most promising levers (BTC, ~4.4mo, in-sample):
+
+| Variant | Profit factor | Return | Daily PnL |
+|---|---|---|---|
+| baseline | 0.36 | −39% | −$14.8 |
+| trending-only (regime filter) | 0.49 | −21% | −$7.8 |
+| quick-profit (TP<SL) | 0.54 | −27% | −$10.2 |
+| slow EMA 21/55 | 0.36 | −39% | (no effect) |
+
+Best lever (trending-only) only *halves* the loss; **all profit factors < 1.0 even in-sample** (the most favorable case). A strategy that can't be profitable in-sample has no extractable edge — it needs **new signal logic**, not tuning. The `backtest.trending_only` flag is real/reusable (cuts losses ~half) but does not create profit.
+
+### Decision (2026-06-07): accept realistic outcome
+Owner chose to treat the safety hardening + backtest tooling + honest assessment as the deliverable. **No real capital deployed.** Extended paper run continues as forward evidence. The $100/day target is shelved as not attainable with this strategy; revisiting profit requires a separate new-strategy research effort.
+
 ## Safety guards — fixed & tested (154 tests green)
 - **Trailing-stop ratchet bug** fixed (stop no longer loosens on a retrace).
 - **`max_open_positions`** now actually enforced (was dead config) + no double-position per symbol.
