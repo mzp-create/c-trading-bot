@@ -314,8 +314,11 @@ class TradingBot:
             buy_score /= total_weight
             sell_score /= total_weight
 
-        # Decision
-        confidence_threshold = 0.20
+        # Decision. Confidence threshold is now configurable (was hardcoded
+        # 0.20). Backtests show a higher threshold (fewer, higher-conviction
+        # entries) materially cuts the loss — see config strategies.confidence_threshold.
+        confidence_threshold = float(
+            self.config.get('strategies', {}).get('confidence_threshold', 0.20))
         if buy_score > sell_score and buy_score > confidence_threshold:
             signal = "BUY"
             confidence = buy_score
@@ -541,6 +544,18 @@ class TradingBot:
                     )
             except Exception as e:
                 self.log.warning(f"[{symbol}] Regime detection error: {e}")
+
+            # Regime entry-filter: optionally only ENTER in a TRENDING regime.
+            # Backtests show this is the single biggest loss-reducer for these
+            # trend/EMA signals (they whipsaw in ranging/volatile markets).
+            # Off by default; enable via regime_detector.trade_only_trending.
+            if self.config.get('regime_detector', {}).get('trade_only_trending', False):
+                if regime.value != "TRENDING":
+                    self.log.info(f"[{symbol}] Skipping — regime {regime.value} "
+                                  f"(trade_only_trending)")
+                    decision["signal"] = "HOLD"
+                    decision["reason"] += f" | NonTrending({regime.value})"
+                    return decision
 
             # Check correlation limits (prevent over-concentration)
             if self.config.get('regime_detector', {}).get('enabled', True):
