@@ -55,6 +55,7 @@ class MarketRegimeDetector:
         rc = config.get("regime_detector", {})
         self._log = logging.getLogger(f"{__name__}.MarketRegimeDetector")
         self._config = config  # kept for correlation data fetching
+        self._ohlcv = None     # lazily-built keyless public OHLCV fetcher
 
         # Detection thresholds
         self._adx_trending_threshold = float(rc.get("adx_trending_threshold", 25))
@@ -353,10 +354,18 @@ class MarketRegimeDetector:
         return same_dir / total if total > 0 else 0.5
 
     def _get_recent_returns(self, asset, lookback=30):
-        """Fetch recent OHLCV for correlation analysis."""
-        from market_data.collector import MarketDataCollector
+        """Fetch recent OHLCV for correlation analysis.
+
+        Uses the keyless public OhlcvFetcher (candles need no auth). A live
+        MarketDataCollector must NEVER be built here: it spins up an
+        authenticated WsFeed on the shared API key, and constructing one per
+        correlation check leaked hundreds of WS connections whose colliding
+        nonces caused the 2026-06-07 `10114 nonce: small` storm.
+        """
         try:
-            collector = MarketDataCollector(self._config)
-            return collector.get_ohlcv(asset, timeframe="1h", limit=lookback)
+            if self._ohlcv is None:
+                from bitfinex.ohlcv import OhlcvFetcher
+                self._ohlcv = OhlcvFetcher()
+            return self._ohlcv.fetch_ohlcv(asset, timeframe="1h", limit=lookback)
         except Exception:
             return None
