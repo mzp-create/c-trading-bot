@@ -106,6 +106,8 @@ class BacktestEngine:
 
         self.max_open = int(self.config.get("trading", {}).get("max_open_positions", 3))
         self.max_daily_loss = abs(float(self.config.get("risk", {}).get("max_daily_loss", 150.0)))
+        # Probe lever: only enter when the regime is TRENDING (skip RANGING/VOLATILE).
+        self.trending_only = bool(self.config.get("backtest", {}).get("trending_only", False))
 
         # Where to cache the long history we fetch (repeatable runs).
         self.data_dir = Path(__file__).parent / "data"
@@ -499,6 +501,11 @@ class BacktestEngine:
                 sl_pct = regime_params["stop_loss_pct"] if regime_params else base_sl
                 tp_pct = regime_params["take_profit_pct"] if regime_params else base_tp
                 size_mult = regime_params["position_size_mult"] if regime_params else 1.0
+
+                # Probe lever: trade only in trending regimes (a trend-follower
+                # whipsaws in ranging/volatile markets).
+                if self.trending_only and regime_str != "TRENDING":
+                    continue
 
                 # --- Position sizing (EXACT live call) ---
                 pair_capital = s.get("pair_capital", self.initial_capital)
