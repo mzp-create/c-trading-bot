@@ -190,27 +190,65 @@ class WsFeed:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
-        if self._bfx is None:
-            from bfxapi import Client
-            kwargs = {"api_key": self._api_key, "api_secret": self._api_secret}
-            if self._wss_host:
-                kwargs["wss_host"] = self._wss_host
-            self._bfx = Client(**kwargs)
-        self._register_handlers()
         try:
-            loop.run_until_complete(self._main())
+            loop.run_until_complete(self._supervise())
         except Exception as exc:                # never crash the process
-            log.error("WS feed loop exited: %s", exc)
+            log.error("WS supervisor crashed: %s", exc)
         finally:
             self._mark_down()
             loop.close()
 
-    async def _main(self):
-        recon = asyncio.create_task(self._reconcile_loop())
+    def _build_client(self):
+        if self._bfx_factory is not None:
+            return self._bfx_factory()
+        if self._injected_bfx is not None and not self._used_injected:
+            self._used_injected = True
+            return self._injected_bfx
+        from bfxapi import Client
+        kwargs = {"api_key": self._api_key, "api_secret": self._api_secret}
+        if self._wss_host:
+            kwargs["wss_host"] = self._wss_host
+        return Client(**kwargs)
+
+    async def _close_client(self, bfx) -> None:
         try:
-            await self._bfx.wss.start()
-        finally:
-            recon.cancel()
+            await bfx.wss.close()
+        except Exception:
+            pass
+
+    async def _supervise(self):
+        """Sequential reconnect loop: connect -> run until disconnect/terminal
+        -> (unless stopping) backoff -> reconnect with a FRESH client. A new
+        client is built only after the previous one is closed, so two WS
+        connections never coexist on the shared key."""
+        delay = self._reconnect_min
+        while not self._stopping:
+            self._bfx = self._build_client()
+            self._register_handlers()
+            recon = asyncio.create_task(self._reconcile_loop())
+            connected_at = self._clock()
+            terminal = None
+            try:
+                await self._bfx.wss.start()     # blocks for the connection lifetime
+            except Exception as exc:
+                terminal = exc
+                log.error("WS feed loop exited: %s", exc)
+            finally:
+                recon.cancel()
+                try:
+                    await recon
+                except BaseException:
+                    pass
+                self._mark_down()               # REST fallback during the gap
+                await self._close_client(self._bfx)
+            if self._stopping:
+                break
+            if self._clock() - connected_at >= self._healthy_reset_after:
+                delay = self._reconnect_min
+            sleep_for = self._backoff(delay, terminal)
+            log.warning("WS reconnecting in %.1fs", sleep_for)
+            await self._sleep(sleep_for)
+            delay = min(delay * self._reconnect_factor, self._reconnect_max)
 
     async def _reconcile_loop(self):
         """Periodic REST reconcile — the reconnect-recovery mechanism, since
@@ -252,6 +290,7 @@ class WsFeed:
             log.error("WS handler %s failed: %s", getattr(fn, "__name__", fn), exc)
 
     def stop(self) -> None:
+        self._stopping = True
         loop, thread, bfx = self._loop, self._thread, self._bfx
         if loop is None or thread is None:
             return
