@@ -1,5 +1,19 @@
 # Live Readiness & Profit Assessment (2026-06-07)
 
+## FINAL OUTCOME — owner accepted realistic re-scope (2026-06-07)
+The $100/day (2%/day) and the reframed 2%/month targets are **accepted as not
+attainable** with any accessible strategy (proven across trend, mean-reversion,
+breakout, ~9,300 configs, exit tuning, cross-sectional momentum, and funding
+carry — full evidence below). **Re-scoped expectation:** low-single-digit %/year
+at low risk is the realistic ceiling; treat anything better as unproven.
+**Deliverable accepted:** the safe, hardened, fully-tested bot (live on ~$536) +
+honest assessment + reusable backtest/research tooling. No claim of profitability.
+Profit edge remains an open research problem (see PROFIT_ROADMAP.md); revisit only
+with new data/markets/venue, no guarantee.
+
+---
+
+
 Goal evaluated: *"ready for live trades with safety guards, achieving $100/day on up to $5,000."*
 
 ## TL;DR
