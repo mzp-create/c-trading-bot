@@ -170,6 +170,25 @@ class TradingBot:
         self.log.info(f"🎯 Daily Target: ${self.config.get('trading', {}).get('daily_target', 100)}")
         self.log.info(f"⚙️  Max Positions: {self.config.get('trading', {}).get('max_open_positions', 6)}")
 
+        # Safety: reload today's realized PnL from the DB so a mid-day crash +
+        # restart does NOT reset the daily-loss-breaker budget back to zero
+        # (otherwise a bad day could keep bleeding past the limit across restarts).
+        # Best-effort; never blocks startup.
+        try:
+            repo = getattr(self.executor, "_repo", None)
+            if repo is not None:
+                today = datetime.now().date()
+                prior = float(repo.daily_pnl(today.isoformat()))
+                self.daily_pnl = prior
+                self._last_reset_date = today
+                if prior:
+                    self.log.info(
+                        f"Reloaded today's realized PnL from DB: ${prior:.2f} "
+                        f"(daily-loss breaker budget preserved across restart)"
+                    )
+        except Exception as exc:
+            self.log.warning(f"Could not reload daily PnL on startup: {exc}")
+
     def _equity_snapshot_values(self):
         """Best-effort (balance, equity) for the per-cycle snapshot.
 
