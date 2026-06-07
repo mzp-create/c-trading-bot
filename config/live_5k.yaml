@@ -4,9 +4,13 @@
 #   python3 main.py --mode live --instance default --config config/live_5k.yaml
 #
 # IMPORTANT — read before going live:
-#   * This config sizes positions and caps risk for $5k. It does NOT guarantee
-#     profit. The strategy's edge is UNVALIDATED — run the backtest and an
-#     extended paper period first, and ramp capital gradually.
+#   * REALISTIC TARGET (revised 2026-06-07): the original "$100/day = 2%/day" is
+#     NOT attainable with this strategy. A 4.4-month backtest shows NEGATIVE edge
+#     (-28% return, profit factor 0.59, ~-0.2%/day). DO NOT deploy real capital
+#     until the strategy demonstrates *positive expectancy* in forward paper
+#     trading. Near-term goal = break-even/small-positive in paper, not $100/day.
+#   * Run paper first:  python main.py --mode paper --config config/live_5k.yaml
+#   * This config sizes positions and caps risk for $5k; it does NOT create edge.
 #   * Ensemble/RL stays in SHADOW (unproven model must not trade).
 
 trading:
@@ -28,7 +32,8 @@ trading:
       enabled: true
 
   initial_capital: 5000.0
-  daily_target: 100.0              # aspiration, NOT a guarantee (see header)
+  daily_target: 25.0               # realistic stretch (~0.5%/day) IF edge is
+  # proven in paper first. Original $100/day (2%/day) is not attainable — see header.
   max_risk_per_trade: 0.015        # 1.5% of capital risked per trade (~$75 max loss)
   max_open_positions: 3            # now actually enforced
   position_size_mode: "dynamic"
