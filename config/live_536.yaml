@@ -1,0 +1,122 @@
+# LIVE config — real ~$536 margin wallet. No profit target; trade only when a
+# trend is present (regime entry-filter), both directions, with hardened guards.
+#   python main.py --mode live --instance default --config config/live_536.yaml
+#
+# Strategy edge is break-even-at-best (documented). This runs the real strategy
+# live per owner's explicit direction. Safety guards are on; ensemble stays shadow.
+
+trading:
+  instance: "default"
+  trade_direction: "both"          # long in up-trends, short in down-trends
+  symbols:
+    - {name: "BTC/USDT", symbol: "tBTCUST", allocation_pct: 50.0, enabled: true}
+    - {name: "ETH/USDT", symbol: "tETHUST", allocation_pct: 30.0, enabled: true}
+    - {name: "SOL/USDT", symbol: "tSOLUST", allocation_pct: 20.0, enabled: true}
+  initial_capital: 536.0           # real margin wallet; drives position sizing
+  daily_target: 0                  # no target — trade trends as they come
+  max_risk_per_trade: 0.05         # AGGRESSIVE: 5% risked per trade
+  max_open_positions: 3
+  position_size_mode: "dynamic"
+  min_position_value_usd: 15.0
+
+exchange:
+  name: "bitfinex"
+  testnet: false
+  rate_limit: 1.0
+  trust_exchange_positions: false
+  ws_reconnect_delay: 5
+  ws:
+    enabled: true
+    wss_host: "wss://api.bitfinex.com/ws/2"
+    ticker_staleness_seconds: 15
+    order_confirm_timeout_seconds: 10
+    reconcile_interval_seconds: 90
+  default_type: "margin"
+  api_key: "${BITFINEX_LONG_API_KEY}"
+  api_secret: "${BITFINEX_LONG_API_SECRET}"
+
+strategies:
+  confidence_threshold: 0.15       # AGGRESSIVE: more entries
+  enabled: ["ensemble", "trend_following", "grid"]
+  ensemble:
+    enabled: true
+    shadow: true                   # unproven model — observe only, never trades
+    ml_weight: 0.4
+    rl_weight: 0.6
+    confidence_threshold: 0.15
+    agreement_required: false
+    use_dynamic_sizing: true
+    max_position_pct: 0.95
+  trend_following:
+    enabled: true
+    weight: 0.4
+    timeframe: "1h"
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+  grid:
+    enabled: true
+    weight: 0.25
+    timeframe: "15m"
+    grid_levels: 10
+    grid_spread_pct: 0.5
+
+ml:
+  enabled: true
+  model_type: "xgboost"
+  features: ["rsi", "macd", "bb_upper", "bb_lower", "ema_9", "ema_21",
+             "volume_sma", "price_change_1h", "price_change_4h", "volatility"]
+  lookback: 48
+  retrain_interval: 24
+  min_train_samples: 200
+
+regime_detector:
+  enabled: true
+  trade_only_trending: true        # ENTER only in a TRENDING regime ("profitable trend")
+  adx_trending_threshold: 25
+  adx_ranging_threshold: 20
+  volatility_ratio_threshold: 1.5
+  lookback: 50
+  trend_lookback: 14
+  max_correlation: 0.7
+  regime_params:
+    TRENDING: {stop_loss_mult: 1.0, take_profit_mult: 1.0, position_size_mult: 1.0}
+    RANGING:  {stop_loss_mult: 0.8, take_profit_mult: 0.7, position_size_mult: 0.8}
+    VOLATILE: {stop_loss_mult: 1.5, take_profit_mult: 1.0, position_size_mult: 0.5}
+
+sentiment:
+  enabled: false
+
+risk:
+  leverage: 4.0                    # AGGRESSIVE (was 2.0)
+  max_daily_loss: 60.0             # AGGRESSIVE breaker ~11% (still a backstop)
+  max_drawdown_pct: 20.0           # AGGRESSIVE (~$107)
+  max_single_pct: 0.30             # AGGRESSIVE per-pair cap
+  stop_loss_pct: 3.0
+  take_profit_pct: 6.0
+  trailing_stop: true
+  trailing_stop_activation: 2.0
+  trailing_stop_distance: 2.0      # wider trailing (best drawdown in probe)
+  cooldown_after_loss: 600
+
+monitoring:
+  log_level: "INFO"
+  save_trades: true
+  save_equity_curve: true
+  telegram_alerts: true
+  telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
+  telegram_chat_id: "${TELEGRAM_CHAT_ID}"
+  alert_on_trade: true
+  alert_on_drawdown: true
+  daily_summary: true
+  instance_prefix: "🔴 LIVE"
+
+data:
+  ohlcv_dir: "instances/live536/data/ohlcv/"
+  models_dir: "instances/live536/data/models/"
+  trades_file: "instances/live536/data/trades.csv"
+  db_file: "instances/live536/data/trading.db"
+  equity_file: "instances/live536/data/equity.csv"
+  log_file: "instances/live536/logs/bot.log"

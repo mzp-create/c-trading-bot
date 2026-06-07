@@ -40,3 +40,6 @@ data/models/
 # backtest data/cache artifacts
 backtest/data/
 backtest/__pycache__/
+
+# local Claude harness state
+.claude/
