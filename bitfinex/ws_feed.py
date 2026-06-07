@@ -9,6 +9,7 @@ suppresses auth/snapshot events after the first connection). Reuses bitfinex.res
 import asyncio
 import itertools
 import logging
+import random
 import threading
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -35,7 +36,11 @@ class WsFeed:
                  ticker_staleness: float = 15.0,
                  order_confirm_timeout: float = 10.0,
                  reconcile_interval: float = 300.0,
-                 wss_host: Optional[str] = None, bfx=None):
+                 wss_host: Optional[str] = None, bfx=None,
+                 reconnect_min: float = 5.0, reconnect_max: float = 300.0,
+                 reconnect_factor: float = 1.7, reconnect_jitter: float = 0.3,
+                 ratelimit_floor: float = 60.0, healthy_reset_after: float = 120.0,
+                 bfx_factory=None, sleep=None, clock=None):
         self._api_key = api_key
         self._api_secret = api_secret
         self._symbols = list(symbols_list)
@@ -47,11 +52,25 @@ class WsFeed:
         self._reconcile_interval = reconcile_interval
         self._wss_host = wss_host
         self._bfx = bfx                         # injectable; built in start()
+        self._injected_bfx = bfx                # honored on the first build only
+        self._used_injected = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._cid = itertools.count(1)
         self._pending: dict[int, tuple] = {}    # cid -> (Event, holder)
         self._pending_lock = threading.Lock()
+        # reconnect supervisor config + test seams
+        self._reconnect_min = reconnect_min
+        self._reconnect_max = reconnect_max
+        self._reconnect_factor = reconnect_factor
+        self._reconnect_jitter = reconnect_jitter
+        self._ratelimit_floor = ratelimit_floor
+        self._healthy_reset_after = healthy_reset_after
+        self._bfx_factory = bfx_factory
+        self._sleep = sleep or asyncio.sleep
+        import time as _time
+        self._clock = clock or _time.monotonic
+        self._stopping = False
 
     # ── mapping ──────────────────────────────────────────────────────────
     def _pos(self, p) -> Position:
@@ -133,6 +152,21 @@ class WsFeed:
             log.info("WS feed reconciled via REST")
         except Exception as exc:
             log.error("WS reconcile failed: %s", exc)
+
+    # ── reconnect helpers ────────────────────────────────────────────────
+    @staticmethod
+    def _is_ratelimit(exc) -> bool:
+        if exc is None:
+            return False
+        return getattr(exc, "status_code", None) == 429 or "429" in str(exc)
+
+    def _backoff(self, delay: float, terminal) -> float:
+        out = delay
+        if self._reconnect_jitter:
+            out = out * (1.0 + self._reconnect_jitter * (2 * random.random() - 1))
+        if self._is_ratelimit(terminal):
+            out = max(out, self._ratelimit_floor)
+        return out
 
     # ── health ───────────────────────────────────────────────────────────
     def is_healthy(self) -> bool:
