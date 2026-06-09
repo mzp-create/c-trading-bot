@@ -31,7 +31,8 @@ class BfxRest:
                      reduce_only: bool = False) -> Order:
         bfx_symbol = symbols.to_bitfinex(symbol)
         signed = abs(amount) if side.lower() == "buy" else -abs(amount)
-        bfx_type = "MARKET" if order_type.lower() == "market" else "LIMIT"
+        bfx_type = {"market": "MARKET", "limit": "LIMIT",
+                    "stop": "STOP"}.get(order_type.lower(), "LIMIT")
         flags = REDUCE_ONLY if reduce_only else 0
         try:
             notif = self._client.rest.auth.submit_order(
