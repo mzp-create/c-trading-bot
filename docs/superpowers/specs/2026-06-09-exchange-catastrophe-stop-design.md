@@ -1,7 +1,7 @@
 # Exchange-native catastrophe-floor stop — design
 
 **Date:** 2026-06-09
-**Status:** approved (design); live-test PASSED 2026-06-09 — ready for implementation plan
+**Status:** DEPLOYED LIVE 2026-06-09 (master @ a792f97). Implemented via plan `docs/superpowers/plans/2026-06-09-exchange-catastrophe-stop.md`; 195 tests pass; live-verified — reconcile placed reduce-only stops for all 3 positions (ETH/BTC shorts above entry, SOL long below), and a second restart adopted them with no duplication, 0 nonce errors.
 **Author:** Zeya Phyo (with Claude)
 
 ## Problem
