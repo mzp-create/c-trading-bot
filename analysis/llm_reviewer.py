@@ -106,9 +106,16 @@ class LLMReviewer:
         self._enabled = bool(self._api_key)
 
         # Rate limit: at most one LLM call every N seconds
-        self._min_interval = config.get("llm_reviewer", {}).get(
-            "min_interval_seconds", 120
-        )
+        llm_cfg = config.get("llm_reviewer", {})
+        self._min_interval = llm_cfg.get("min_interval_seconds", 120)
+        # Model + request budget. Default is deepseek-v4-flash, a REASONING
+        # model: its reasoning tokens count against max_tokens, so the budget
+        # must cover the chain-of-thought AND the JSON verdict — a small budget
+        # truncates the verdict (empty content) and silently degrades every
+        # review to HOLD. timeout is larger for the same reason (slower calls).
+        self._model = llm_cfg.get("model", "deepseek-v4-flash")
+        self._max_tokens = int(llm_cfg.get("max_tokens", 2048))
+        self._timeout = int(llm_cfg.get("timeout_seconds", 30))
         self._last_call: Optional[datetime] = None
 
         if self._enabled:
@@ -214,15 +221,15 @@ class LLMReviewer:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "deepseek-chat",
+                "model": self._model,
                 "messages": [
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": 150,
+                "max_tokens": self._max_tokens,
                 "temperature": 0.3,
             },
-            timeout=15,
+            timeout=self._timeout,
         )
         resp.raise_for_status()
         data = resp.json()
