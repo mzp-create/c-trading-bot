@@ -104,3 +104,31 @@ def test_paper_stop_without_trigger_price_is_rejected():
     broker = PaperBroker(initial_capital=1000.0)
     with pytest.raises(OrderRejected):
         broker.submit_order("SOL/USDT", "sell", 1.0, order_type="stop")
+
+
+def test_rest_get_open_orders_parses_active_orders():
+    class _ActiveOrder:
+        id = 222
+        symbol = "tSOLUST"
+        amount_orig = -1.5
+        price = 30.0
+        flags = REDUCE_ONLY
+        order_type = "STOP"
+        order_status = "ACTIVE"
+
+    class _Auth:
+        def get_orders(self):
+            return [_ActiveOrder()]
+
+    class _Client:
+        rest = type("R", (), {"auth": _Auth(), "public": None})()
+
+    r = BfxRest("k", "s", client=_Client())
+    orders = r.get_open_orders()
+    assert len(orders) == 1
+    o = orders[0]
+    assert o.id == 222
+    assert o.symbol == "SOL/USDT"     # display form
+    assert o.side == "sell"            # negative amount_orig
+    assert o.reduce_only is True
+    assert o.order_type == "stop"

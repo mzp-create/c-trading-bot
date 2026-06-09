@@ -58,6 +58,21 @@ class BfxRest:
                                     "buy" if o.amount_orig >= 0 else "sell",
                                     "market", abs(o.amount_orig or 0.0), False)
 
+    def get_open_orders(self) -> List[Order]:
+        out = []
+        for o in self._client.rest.auth.get_orders():
+            amt = float(o.amount_orig or 0.0)
+            out.append(Order(
+                id=o.id, symbol=symbols.to_display(o.symbol),
+                side="buy" if amt >= 0 else "sell",
+                order_type=(o.order_type or "").lower().replace(" ", "_") or "stop",
+                amount=abs(amt), filled=0.0,
+                avg_price=(getattr(o, "price", None) or None),
+                status=(o.order_status or "").upper(),
+                reduce_only=bool((getattr(o, "flags", 0) or 0) & REDUCE_ONLY),
+                fee=0.0, fee_currency=None, raw=o))
+        return out
+
     def _order_from_bfx(self, o, display_symbol, side, order_type, amount,
                         reduce_only) -> Order:
         status = (o.order_status or "").upper()

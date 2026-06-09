@@ -113,6 +113,9 @@ class BitfinexClient:
     def cancel_order(self, order_id: int) -> Order:
         return self._auth.cancel_order(order_id)   # REST: rare path, reliable
 
+    def fetch_open_orders(self) -> List[Order]:
+        return self._auth.get_open_orders()
+
     # ── reads (auth) ─────────────────────────────────────────────────────
     def fetch_positions(self) -> List[Position]:
         if self._account is not None and self._account.authenticated:
