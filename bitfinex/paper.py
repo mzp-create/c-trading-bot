@@ -5,6 +5,7 @@ this broker only produces realistic fills and tracks balances/positions.
 Open + reduce-only-close semantics, matching the live flow.
 """
 
+import dataclasses
 from typing import List, Optional
 
 from bitfinex.models import Order, Position, Wallet, Fill
@@ -28,7 +29,7 @@ class PaperBroker:
             self._wallets.setdefault(base, {"balance": 0.0, "available": 0.0})
         self._positions: dict[str, Position] = {}   # symbol -> Position
         self._fills: dict[str, Fill] = {}
-        self._open_orders: dict[int, Order] = {}   # id -> resting stop
+        self._open_orders: dict[int, Order] = {}   # id -> resting order
         self._next_id = 1
 
     # ── orders ───────────────────────────────────────────────────────────
@@ -36,6 +37,8 @@ class PaperBroker:
                      order_type: str = "market", price: Optional[float] = None,
                      reduce_only: bool = False) -> Order:
         if order_type.lower() == "stop":
+            if price is None:
+                raise OrderRejected("stop order requires a trigger price")
             oid = self._next_id
             self._next_id += 1
             signed = abs(amount) if side == "buy" else -abs(amount)
@@ -119,7 +122,9 @@ class PaperBroker:
                      fee_currency=quote, raw=None)
 
     def cancel_order(self, order_id: int) -> Order:
-        self._open_orders.pop(order_id, None)
+        existing = self._open_orders.pop(order_id, None)
+        if existing is not None:
+            return dataclasses.replace(existing, status="CANCELED")
         return Order(id=order_id, symbol="", side="buy", order_type="market",
                      amount=0.0, filled=0.0, avg_price=None, status="CANCELED",
                      reduce_only=False, fee=0.0, fee_currency=None, raw=None)
