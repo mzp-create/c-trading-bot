@@ -55,8 +55,21 @@ def test_record_decision_signal_for_hold_and_acted(tmp_path):
 
 
 def test_equity_snapshot_values(tmp_path):
+    from persistence.models import TradeRecord as TR
     eng = _engine(tmp_path)
-    bot = _stub_bot(eng, initial_capital=500.0, daily_pnl=5.0)
+    # Cumulative realized PnL across all days = +5.0 (10 - 10 + 5).
+    eng._repo.record_trade(TR(ts="2026-06-01T10:00:00+00:00", symbol="BTC/USDT",
+                              side="buy", entry_price=100, close_price=110,
+                              amount=1, pnl=10.0))
+    eng._repo.record_trade(TR(ts="2026-06-01T12:00:00+00:00", symbol="ETH/USDT",
+                              side="sell", entry_price=50, close_price=55,
+                              amount=2, pnl=-10.0))
+    eng._repo.record_trade(TR(ts="2026-06-02T09:00:00+00:00", symbol="BTC/USDT",
+                              side="buy", entry_price=100, close_price=105,
+                              amount=1, pnl=5.0))
+    # daily_pnl is intentionally a DIFFERENT value to prove the balance uses
+    # CUMULATIVE realized PnL, not just today's (the 2026-06-09 fix).
+    bot = _stub_bot(eng, initial_capital=500.0, daily_pnl=99.0)
     bal, eq = TradingBot._equity_snapshot_values(bot)
-    assert bal == 505.0
-    assert eq == 505.0
+    assert bal == 505.0   # 500 + cumulative realized (5.0), NOT 500 + 99
+    assert eq == 505.0    # no open positions -> equity == balance

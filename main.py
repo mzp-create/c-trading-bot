@@ -192,13 +192,20 @@ class TradingBot:
     def _equity_snapshot_values(self):
         """Best-effort (balance, equity) for the per-cycle snapshot.
 
-        Balance = starting capital + realized daily PnL. Equity adds any
-        unrealized PnL exposed on open positions (0 when unavailable). This is
-        an audit snapshot, refined when the WS account feed lands (Phase 3).
-        NOTE (Phase-1): balance = capital + *daily* PnL, so it steps at the
-        daily reset; equity == balance until the WS feed supplies unrealized.
+        Balance = starting capital + *cumulative* realized PnL (all closed
+        trades, every day). Equity adds any unrealized PnL exposed on open
+        positions (0 when unavailable). Cumulative — not daily — PnL is used so
+        the balance survives the daily reset and tracks the true account: the
+        2026-06-09 bug reported ~$535 against a real $516.53 wallet because
+        prior-day realized losses were dropped when daily_pnl reset to 0.
         """
-        balance = self.initial_capital + self.daily_pnl
+        try:
+            realized = self.executor._repo.total_realized_pnl()
+        except Exception:
+            # Best-effort snapshot: fall back to at least today's PnL rather
+            # than raising out of the per-cycle path.
+            realized = self.daily_pnl
+        balance = self.initial_capital + realized
         unrealized = 0.0
         try:
             for pos in self.executor.open_positions:

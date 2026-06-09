@@ -174,6 +174,13 @@ def test_reads_and_aggregates(tmp_path):
     assert len(day1) == 2
     assert pytest.approx(repo.daily_pnl("2026-06-01")) == 0.0
     assert pytest.approx(repo.daily_pnl("2026-06-02")) == 5.0
+    # Cumulative realized PnL spans ALL days (10 - 10 + 5), unlike daily_pnl.
+    # Backs the equity-snapshot balance so it reflects the true account.
+    assert pytest.approx(repo.total_realized_pnl()) == 5.0
+
+
+def test_total_realized_pnl_empty_is_zero(tmp_path):
+    assert pytest.approx(_repo(tmp_path).total_realized_pnl()) == 0.0
 
 
 def test_open_positions_and_equity_curve(tmp_path):

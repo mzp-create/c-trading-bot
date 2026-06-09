@@ -203,6 +203,20 @@ class TradingRepository:
             return float(row[0])
         return self._safe(_do, 0.0)
 
+    def total_realized_pnl(self) -> float:
+        """Cumulative realized PnL across *all* closed trades (every day).
+
+        Unlike :meth:`daily_pnl` (which resets at the daily boundary), this
+        backs the equity-snapshot balance so it reflects the true account
+        rather than just intraday PnL — the 2026-06-09 balance-reporting bug
+        where the bot showed ~$535 against a real $516.53 wallet.
+        """
+        def _do():
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0.0) FROM trades").fetchone()
+            return float(row[0])
+        return self._safe(_do, 0.0)
+
     def trade_exists(self, ts: str, symbol: str, amount: float) -> bool:
         """Idempotency check for the CSV importer."""
         def _do():
