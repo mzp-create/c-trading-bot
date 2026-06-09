@@ -9,7 +9,7 @@ remains as backstop).
 """
 
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 
 class StopOrderManager:
@@ -20,10 +20,19 @@ class StopOrderManager:
 
     @staticmethod
     def _stop_side(position_side: str) -> str:
-        return "sell" if position_side.lower() == "buy" else "buy"
+        ps = position_side.lower()
+        if ps == "buy":
+            return "sell"
+        if ps == "sell":
+            return "buy"
+        raise ValueError(f"unexpected position_side {position_side!r}")
 
     def place(self, symbol: str, position_side: str, amount: float,
               stop_price: float) -> Optional[int]:
+        if symbol in self._ids:
+            self._log.warning("[%s] replacing existing catastrophe stop id=%s",
+                              symbol, self._ids[symbol])
+            self.cancel(symbol)
         try:
             order = self._client.create_order(
                 symbol, self._stop_side(position_side), abs(amount),
@@ -35,8 +44,8 @@ class StopOrderManager:
                                symbol, oid, stop_price)
             return oid
         except Exception as exc:
-            self._log.error("[%s] failed to place catastrophe stop: %s",
-                            symbol, exc)
+            self._log.error("[%s] UNPROTECTED — failed to place catastrophe "
+                            "stop: %s", symbol, exc)
             return None
 
     def cancel(self, symbol: str) -> None:
@@ -50,7 +59,7 @@ class StopOrderManager:
             self._log.error("[%s] failed to cancel catastrophe stop id=%s: %s",
                             symbol, oid, exc)
 
-    def reconcile(self, positions) -> None:
+    def reconcile(self, positions: List[Dict[str, Any]]) -> None:
         """On restart: adopt an existing reduce-only stop per position, place
         one where missing, and cancel orphan reduce-only stops with no matching
         open position."""
@@ -62,7 +71,11 @@ class StopOrderManager:
 
         by_symbol: dict[str, int] = {}
         for o in open_orders:
-            if getattr(o, "reduce_only", False):
+            # Only adopt exchange STOP orders. This bot places no exchange-native
+            # take-profits, so today all reduce_only resting orders are stops —
+            # but filter by order_type to stay correct if that ever changes.
+            if (getattr(o, "reduce_only", False)
+                    and getattr(o, "order_type", "") == "stop"):
                 by_symbol.setdefault(o.symbol, o.id)
 
         held = {p.get("symbol") for p in positions}
@@ -76,14 +89,15 @@ class StopOrderManager:
                 continue
             stop_loss = p.get("stop_loss")
             if stop_loss is None:
-                self._log.warning("[%s] no stop_loss on reload — cannot place "
-                                  "catastrophe stop", symbol)
+                self._log.error("[%s] UNPROTECTED on reload — no stop_loss, "
+                                "cannot place catastrophe stop", symbol)
                 continue
             self.place(symbol, p.get("side", "buy"),
                        float(p.get("amount", 0.0)), float(stop_loss))
 
         for symbol, oid in by_symbol.items():
             if symbol not in held:
+                self._ids.pop(symbol, None)
                 try:
                     self._client.cancel_order(oid)
                     self._log.info("[%s] cancelled orphan catastrophe stop id=%s",
