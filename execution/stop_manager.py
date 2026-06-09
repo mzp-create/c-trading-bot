@@ -49,3 +49,45 @@ class StopOrderManager:
         except Exception as exc:
             self._log.error("[%s] failed to cancel catastrophe stop id=%s: %s",
                             symbol, oid, exc)
+
+    def reconcile(self, positions) -> None:
+        """On restart: adopt an existing reduce-only stop per position, place
+        one where missing, and cancel orphan reduce-only stops with no matching
+        open position."""
+        try:
+            open_orders = self._client.fetch_open_orders()
+        except Exception as exc:
+            self._log.error("stop reconcile: fetch_open_orders failed: %s", exc)
+            return
+
+        by_symbol: dict[str, int] = {}
+        for o in open_orders:
+            if getattr(o, "reduce_only", False):
+                by_symbol.setdefault(o.symbol, o.id)
+
+        held = {p.get("symbol") for p in positions}
+
+        for p in positions:
+            symbol = p.get("symbol")
+            if symbol in by_symbol:
+                self._ids[symbol] = by_symbol[symbol]
+                self._log.info("[%s] adopted existing catastrophe stop id=%s",
+                               symbol, by_symbol[symbol])
+                continue
+            stop_loss = p.get("stop_loss")
+            if stop_loss is None:
+                self._log.warning("[%s] no stop_loss on reload — cannot place "
+                                  "catastrophe stop", symbol)
+                continue
+            self.place(symbol, p.get("side", "buy"),
+                       float(p.get("amount", 0.0)), float(stop_loss))
+
+        for symbol, oid in by_symbol.items():
+            if symbol not in held:
+                try:
+                    self._client.cancel_order(oid)
+                    self._log.info("[%s] cancelled orphan catastrophe stop id=%s",
+                                   symbol, oid)
+                except Exception as exc:
+                    self._log.error("[%s] failed to cancel orphan stop id=%s: %s",
+                                    symbol, oid, exc)

@@ -71,3 +71,32 @@ def test_place_swallows_client_error_and_returns_none():
             raise RuntimeError("rejected")
     mgr = StopOrderManager(_Boom())
     assert mgr.place("SOL/USDT", "buy", 1.5, 60.0) is None
+
+
+def test_reconcile_adopts_existing_places_missing_cancels_orphans():
+    client = _Client()
+    # Exchange already has a reduce-only stop for SOL (adopt), an orphan stop
+    # for XRP (no position -> cancel), and none for ETH (place).
+    client.fetch_open_orders = lambda: [
+        _Order(901, symbol="SOL/USDT", side="sell", reduce_only=True),
+        _Order(902, symbol="XRP/USDT", side="sell", reduce_only=True),
+    ]
+    mgr = StopOrderManager(client)
+    positions = [
+        {"symbol": "SOL/USDT", "side": "buy", "amount": 1.5, "stop_loss": 60.0},
+        {"symbol": "ETH/USDT", "side": "sell", "amount": 0.1, "stop_loss": 1800.0},
+    ]
+    mgr.reconcile(positions)
+
+    assert mgr._ids["SOL/USDT"] == 901            # adopted
+    assert "ETH/USDT" in mgr._ids                 # placed
+    assert 902 in client.cancelled                # orphan cancelled
+    assert [c["symbol"] for c in client.created] == ["ETH/USDT"]  # only ETH placed
+
+
+def test_reconcile_skips_position_without_stop_loss():
+    client = _Client()
+    client.fetch_open_orders = lambda: []
+    mgr = StopOrderManager(client)
+    mgr.reconcile([{"symbol": "SOL/USDT", "side": "buy", "amount": 1.5}])
+    assert client.created == []   # no stop_loss -> cannot place, skip
