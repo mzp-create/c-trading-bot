@@ -47,3 +47,28 @@ def test_submit_order_maps_stop_to_STOP_with_trigger_and_reduce_only():
     assert call["flags"] == REDUCE_ONLY
     assert call["amount"] == "-1.50000000"  # sell -> negative
     assert order.order_type == "stop"
+
+
+def test_ws_send_submit_maps_stop_to_STOP(monkeypatch):
+    import bitfinex.ws_feed as wf
+
+    captured = {}
+
+    class _Inputs:
+        def submit_order(self, **kw):
+            captured.update(kw)
+            return None  # coroutine stand-in; not awaited in this test
+
+    feed = object.__new__(wf.WsFeed)
+    feed._bfx = type("B", (), {"wss": type("W", (), {"inputs": _Inputs()})()})()
+    feed._loop = None
+
+    monkeypatch.setattr(wf.asyncio, "run_coroutine_threadsafe",
+                        lambda coro, loop: None)
+
+    feed._send_submit("SOL/USDT", "sell", 1.5, "stop", 33.14, True, cid=7)
+    assert captured["type"] == "STOP"
+    assert captured["price"] == "33.14"
+    assert captured["flags"] == wf.REDUCE_ONLY
+    assert captured["amount"] == "-1.50000000"
+    assert captured["cid"] == 7

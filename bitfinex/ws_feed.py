@@ -347,7 +347,8 @@ class WsFeed:
                      reduce_only, cid):
         bfx_symbol = symbols.to_bitfinex(symbol)
         signed = abs(amount) if side.lower() == "buy" else -abs(amount)
-        bfx_type = "MARKET" if order_type.lower() == "market" else "LIMIT"
+        bfx_type = {"market": "MARKET", "limit": "LIMIT",
+                    "stop": "STOP"}.get(order_type.lower(), "LIMIT")
         flags = REDUCE_ONLY if reduce_only else 0
         coro = self._bfx.wss.inputs.submit_order(
             type=bfx_type, symbol=bfx_symbol, amount=f"{signed:.8f}",
