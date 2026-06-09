@@ -28,12 +28,25 @@ class PaperBroker:
             self._wallets.setdefault(base, {"balance": 0.0, "available": 0.0})
         self._positions: dict[str, Position] = {}   # symbol -> Position
         self._fills: dict[str, Fill] = {}
+        self._open_orders: dict[int, Order] = {}   # id -> resting stop
         self._next_id = 1
 
     # ── orders ───────────────────────────────────────────────────────────
     def submit_order(self, symbol: str, side: str, amount: float, *,
                      order_type: str = "market", price: Optional[float] = None,
                      reduce_only: bool = False) -> Order:
+        if order_type.lower() == "stop":
+            oid = self._next_id
+            self._next_id += 1
+            signed = abs(amount) if side == "buy" else -abs(amount)
+            o = Order(id=oid, symbol=symbol, side=side, order_type="stop",
+                      amount=abs(amount), filled=0.0, avg_price=None,
+                      status="ACTIVE", reduce_only=reduce_only, fee=0.0,
+                      fee_currency=None, raw={"trigger": float(price or 0.0),
+                                              "amount_orig": signed})
+            self._open_orders[oid] = o
+            return o
+
         base, quote = symbol.split("/")
         ref = float(price or 0.0)
         if reduce_only:
@@ -106,11 +119,15 @@ class PaperBroker:
                      fee_currency=quote, raw=None)
 
     def cancel_order(self, order_id: int) -> Order:
+        self._open_orders.pop(order_id, None)
         return Order(id=order_id, symbol="", side="buy", order_type="market",
                      amount=0.0, filled=0.0, avg_price=None, status="CANCELED",
                      reduce_only=False, fee=0.0, fee_currency=None, raw=None)
 
     # ── reads ────────────────────────────────────────────────────────────
+    def get_open_orders(self) -> List[Order]:
+        return list(self._open_orders.values())
+
     def get_positions(self) -> List[Position]:
         return list(self._positions.values())
 
