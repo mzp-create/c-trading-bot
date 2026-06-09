@@ -1,7 +1,7 @@
 # Exchange-native catastrophe-floor stop — design
 
 **Date:** 2026-06-09
-**Status:** approved (design), live-test pending
+**Status:** approved (design); live-test PASSED 2026-06-09 — ready for implementation plan
 **Author:** Zeya Phyo (with Claude)
 
 ## Problem
@@ -92,16 +92,30 @@ exchange stop has already triggered, the position is gone: the bot-side close fi
 no position (no-op) and the cancel is a no-op. `reduce_only` on both sides prevents
 any double-close from opening exposure.
 
-## Risks / unknowns (resolve via live test before deploy)
-- **bfxapi STOP semantics on margin pairs (tBTCUST/tETHUST/tSOLUST):** exact
-  order-type string, which field carries the trigger price, and whether `reduce_only`
-  is honored for STOP. *(LIVE-TEST RESULT: TBD)*
-- **Ack parseability:** prior notes (`bitfinex-onreq-unparsed`, `bfxapi-rest-market-ack-active`)
-  show market acks don't always parse to an id. If STOP acks are the same, the
-  lifecycle must resolve the id via open-orders fetch. *(LIVE-TEST RESULT: TBD)*
-- **WS vs REST submission:** `create_order` uses the WS path when healthy, else REST.
-  Both must map STOP identically. *(LIVE-TEST RESULT: TBD — REST path probed)*
-- **cancel_order ack shape.** *(LIVE-TEST RESULT: TBD)*
+## Risks / unknowns — RESOLVED by live test (2026-06-09, LONG key, bot paused)
+- **bfxapi STOP semantics on margin pairs:** CONFIRMED. `auth.submit_order(type="STOP",
+  symbol="tSOLUST", amount="-1.92045709", price="<trigger>", flags=1024)` →
+  `order_status=ACTIVE`, `order_type="STOP"`, trigger price echoed in the **`price`**
+  field. So: type string is **`"STOP"`**, trigger goes in **`price`**, signed amount
+  sets direction.
+- **reduce_only honored:** CONFIRMED. `flags=1024` (REDUCE_ONLY) echoed on the resting
+  order; `get_orders()` shows `reduce_only=True`.
+- **Ack parseability:** BETTER THAN MARKET. The STOP submit ack parsed cleanly —
+  `notif.status="SUCCESS"`, `notif.data.id=238683931018`, `order_status="ACTIVE"`. We
+  get the id **inline** (no open-orders fetch needed on the happy path). Keep the
+  open-orders match as a fallback for robustness/reconciliation.
+- **cancel_order:** CONFIRMED. `auth.cancel_order(id=...)` → `status="SUCCESS"`; order
+  gone from `get_orders()`.
+- **WS vs REST:** REST path probed and confirmed. WS path (`ws_feed._send_submit`) must
+  map STOP identically in implementation; covered by Phase A unit tests + the existing
+  WS-healthy routing.
+- **Reads for reconciliation:** `auth.get_orders()` returns active orders with `.id`,
+  `.symbol`, `.order_type`, `.amount_orig`, `.price`, `.flags`, `.order_status` — enough
+  to adopt/match/clean up resting stops on restart.
+
+**Bonus finding:** the exchange-reported SOL entry was **65.614**, vs our DB's stale
+**66.857** — independent confirmation of the stale-anchor bug fixed earlier today
+(commit 3616c43). Validates that fix.
 
 ## Live test (gated, manual, one-off)
 Probe the real LONG key/account against an existing position, during a brief bot
