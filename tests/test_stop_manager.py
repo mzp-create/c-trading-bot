@@ -143,3 +143,11 @@ def test_place_with_bad_side_returns_none():
     mgr = StopOrderManager(client)
     assert mgr.place("SOL/USDT", "long", 1.5, 60.0) is None  # bad side -> None
     assert client.created == []
+
+
+def test_place_rejects_non_positive_trigger():
+    client = _Client()
+    mgr = StopOrderManager(client)
+    assert mgr.place("SOL/USDT", "buy", 1.5, 0.0) is None
+    assert mgr.place("SOL/USDT", "buy", 1.5, -5.0) is None
+    assert client.created == []      # nothing placed

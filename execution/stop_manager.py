@@ -29,6 +29,10 @@ class StopOrderManager:
 
     def place(self, symbol: str, position_side: str, amount: float,
               stop_price: float) -> Optional[int]:
+        if stop_price is None or stop_price <= 0:
+            self._log.error("[%s] UNPROTECTED — refusing to place catastrophe "
+                            "stop at non-positive trigger %s", symbol, stop_price)
+            return None
         if symbol in self._ids:
             self._log.warning("[%s] replacing existing catastrophe stop id=%s",
                               symbol, self._ids[symbol])
