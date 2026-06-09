@@ -230,6 +230,7 @@ class ExecutionEngine:
 
             self._log.info("Position sync complete: %d position(s) loaded",
                            synced_count)
+            self._stop_mgr.reconcile(self.open_positions)
 
         except Exception as exc:
             self._log.error("Failed to sync positions at startup: %s", exc)

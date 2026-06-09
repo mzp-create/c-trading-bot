@@ -32,3 +32,15 @@ def test_entry_places_stop_and_close_cancels_it(tmp_path):
 
     eng.close_position("SOL/USDT", reason="test")
     assert calls["cancel"] == ["SOL/USDT"]
+
+
+def test_sync_positions_triggers_stop_reconcile(tmp_path):
+    eng = _engine(tmp_path)
+    seen = {}
+    eng._stop_mgr.reconcile = lambda positions: seen.setdefault("called", positions)
+    # sync_positions_at_startup returns early in paper mode; override mode and
+    # stub fetch_positions so the loop body is skipped cleanly.
+    eng.mode = "live"
+    eng._client.fetch_positions = lambda: []
+    eng.sync_positions_at_startup()
+    assert "called" in seen
