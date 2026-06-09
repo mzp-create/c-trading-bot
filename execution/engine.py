@@ -30,6 +30,7 @@ from persistence import (
     TradingRepository, OrderRecord, FillRecord, PositionRecord, TradeRecord,
 )
 from bitfinex.errors import OrderRejected, AckUnparseable
+from execution.stop_manager import StopOrderManager
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,10 @@ class ExecutionEngine:
         from bitfinex import BitfinexClient
         self._client = BitfinexClient(config, mode=mode, instance=self.instance)
         self._log.info("BitfinexClient connected (mode=%s)", mode)
+
+        # Catastrophe-stop manager: places a reduce-only exchange-native stop
+        # on every entry and cancels it on every close.
+        self._stop_mgr = StopOrderManager(self._client, self._log)
 
         self._log.info("ExecutionEngine ready")
 
@@ -491,6 +496,8 @@ class ExecutionEngine:
             entry_price=fill_price,
             side=side,
         )
+        # Place catastrophe stop on exchange (reduce-only, best-effort).
+        self._stop_mgr.place(symbol, side, filled, sl_price)
         # Safety-net entry record: used by open_positions union when the exchange
         # doesn't report the position (e.g. Bitfinex margin shorts)
         self._risk_entry[symbol] = {
@@ -692,6 +699,8 @@ class ExecutionEngine:
                 self._record_trade(position, close_price, pnl, reason)
                 self._risk_state.clear(symbol)
                 self._risk_entry.pop(symbol, None)
+                # Cancel the catastrophe stop now that the position is closed.
+                self._stop_mgr.cancel(symbol)
 
                 self._log.info(
                     "Position closed: %s PnL=$%.2f (mode=%s)",
