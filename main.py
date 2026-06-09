@@ -463,14 +463,23 @@ class TradingBot:
     # ticker before an entry is aborted as a stale-candle/phantom price.
     _PRICE_DIVERGENCE_TOL = 0.02
 
-    def _price_diverges_from_live(self, symbol: str, price: float) -> bool:
-        """True if the live ticker disagrees with the OHLCV-derived entry
-        ``price`` beyond ``_PRICE_DIVERGENCE_TOL`` — a stale-candle guard against
-        the 2026-06-05 phantom-price incident.
+    def _entry_anchor_price(self, symbol: str, ohlcv_price: float):
+        """Resolve the price to anchor a new entry (and its SL/TP) on.
 
-        Fails OPEN (returns False) when the live ticker is unavailable — the
-        collector's candle-staleness check is the other guard layer — but logs
-        a warning so the missing cross-check is visible.
+        Returns the LIVE ticker price when it agrees with the OHLCV-derived
+        ``ohlcv_price`` within ``_PRICE_DIVERGENCE_TOL``; returns ``None`` to
+        block the entry when the ticker is unavailable or the two disagree.
+
+        Why anchor on the live ticker rather than the OHLCV candle close: the
+        stop-loss monitor (_check_positions) checks the *live* price, but the
+        entry/SL/TP were historically anchored to the last candle close
+        (``df['close'].iloc[-1]``), which lags the market by up to a candle.
+        On a fast move that lag offsets the whole SL/TP band from the price the
+        stop actually triggers against — the 2026-06-09 order #9 bug, where a
+        SOL long was booked at 66.857 while the market was ~65.5 (1.8% high),
+        leaving its stop mispositioned. Using the live ticker keeps entry and
+        exit on the same price source. The divergence check still fails CLOSED
+        (the 2026-06-05 phantom-price incident).
         """
         try:
             live_price = self.collector.get_current_price(symbol)
@@ -482,17 +491,24 @@ class TradingBot:
             # entry rather than open blind. (Exits/SL-TP do not use this guard.)
             self.log.warning(
                 f"[{symbol}] live ticker unavailable — BLOCKING entry "
-                f"(cannot cross-check OHLCV price {price:.2f})"
+                f"(cannot cross-check OHLCV price {ohlcv_price:.2f})"
             )
-            return True
-        if abs(live_price - price) / live_price > self._PRICE_DIVERGENCE_TOL:
+            return None
+        if abs(live_price - ohlcv_price) / live_price > self._PRICE_DIVERGENCE_TOL:
             self.log.error(
-                f"[{symbol}] OHLCV/ticker price divergence: entry={price:.2f} "
+                f"[{symbol}] OHLCV/ticker price divergence: entry={ohlcv_price:.2f} "
                 f"vs live={live_price:.2f} "
-                f"({abs(live_price - price) / live_price * 100:.1f}%) — skipping"
+                f"({abs(live_price - ohlcv_price) / live_price * 100:.1f}%) — skipping"
             )
-            return True
-        return False
+            return None
+        return live_price
+
+    def _price_diverges_from_live(self, symbol: str, price: float) -> bool:
+        """True if no safe live anchor exists for the OHLCV-derived entry
+        ``price`` — a stale-candle guard against the 2026-06-05 phantom-price
+        incident. Thin wrapper over :meth:`_entry_anchor_price`.
+        """
+        return self._entry_anchor_price(symbol, price) is None
 
     def execute_trade_cycle(self, symbol_config: dict = None):
         """One complete trade cycle for a given symbol config.
@@ -605,15 +621,22 @@ class TradingBot:
                 decision["reason"] += " | InvalidPrice"
                 return decision
 
-            # Safety: the entry price (derived from OHLCV) must agree with the
-            # live ticker before we open. A stale/mismatched OHLCV candle would
-            # otherwise open at a phantom price and get stopped out instantly at
-            # the true market — the 2026-06-05 real-money incident.
-            if self._price_diverges_from_live(symbol, price):
+            # Safety + correctness: anchor the entry on the LIVE ticker, not the
+            # OHLCV candle close. A stale/mismatched candle would otherwise open
+            # at a phantom price (the 2026-06-05 incident) AND mis-place the
+            # SL/TP band relative to the live price the stop monitor checks
+            # against (the 2026-06-09 order #9 bug). Returns None to block.
+            anchor_price = self._entry_anchor_price(symbol, price)
+            if anchor_price is None:
                 decision["signal"] = "HOLD"
                 decision["confidence"] = 0.0
                 decision["reason"] += " | PriceDivergence"
                 return decision
+            # Use the live ticker as the entry/SL/TP anchor so sizing, the
+            # recorded entry, and the stop band all share the stop monitor's
+            # price source.
+            price = anchor_price
+            decision["current_price"] = price
 
             # Portfolio exposure cap — enforce max_open_positions and never stack
             # a second position on a symbol already held. max_open_positions was
