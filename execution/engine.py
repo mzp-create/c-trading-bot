@@ -600,6 +600,49 @@ class ExecutionEngine:
             reason=reason,
         ))
 
+    def _reconcile_if_absent(self, symbol: str,
+                             reason: str) -> Optional[Dict[str, Any]]:
+        """Clear stale local tracking when a close was rejected because the
+        position no longer exists on the exchange.
+
+        This is the cure for the 2026-06-15 phantom-close loop: a position that
+        had already closed exchange-side (e.g. the catastrophe stop fired) stayed
+        in ``_risk_entry`` because ``trust_exchange_positions=False`` unions it
+        back into ``open_positions``. Every cycle the bot tried a reduce-only
+        close and Bitfinex rejected it ("direction: invalid") because there was
+        nothing to reduce — forever.
+
+        Returns a reconciled result dict when the phantom is cleared, or ``None``
+        when the exchange still reports the position (a genuine transient
+        failure → the caller retains state and retries next cycle). On any error
+        reading the exchange we return ``None`` (fail safe: keep the position
+        rather than risk dropping a real one).
+        """
+        try:
+            on_exchange = any(
+                p.symbol == symbol and p.abs_amount != 0
+                for p in self._client.fetch_positions())
+        except Exception as exc:
+            self._log.warning(
+                "[%s] Could not verify position after close rejection: %s",
+                symbol, exc)
+            return None
+        if on_exchange:
+            return None  # real position still open — let the caller retry
+        self._log.warning(
+            "[%s] Close rejected and exchange reports no such position — "
+            "reconciling phantom (clearing local tracking, reason=%s)",
+            symbol, reason)
+        self._risk_state.clear(symbol)
+        self._risk_entry.pop(symbol, None)
+        try:
+            self._stop_mgr.cancel(symbol)
+        except Exception:
+            pass
+        return {"success": False, "pnl": 0.0, "price": 0.0,
+                "error": "position already flat on exchange",
+                "reconciled": True}
+
     def close_position(self, symbol: str, reason: str = "manual") -> Dict[str, Any]:
         """Close an open position for a symbol.
 
@@ -661,7 +704,16 @@ class ExecutionEngine:
                 order = self._client.create_order(
                     symbol, close_side, amount,
                     order_type="market", price=ref, reduce_only=True)
-            except (OrderRejected, AckUnparseable) as exc:
+            except OrderRejected as exc:
+                self._log.error("Failed to close position: %s", exc)
+                reconciled = self._reconcile_if_absent(symbol, reason)
+                if reconciled is not None:
+                    return reconciled
+                return {"success": False, "pnl": 0.0, "price": 0.0,
+                        "error": str(exc)}
+            except AckUnparseable as exc:
+                # Outcome UNKNOWN — the order may have gone through. Do NOT
+                # reconcile or clear; let the next positions read settle it.
                 self._log.error("Failed to close position: %s", exc)
                 return {"success": False, "pnl": 0.0, "price": 0.0,
                         "error": str(exc)}
@@ -709,9 +761,14 @@ class ExecutionEngine:
                 return {"success": True, "pnl": round(pnl, 2),
                         "price": close_price, "error": None}
             else:
-                # Failure: do NOT record a trade and do NOT delete meta.
+                # Failure: do NOT record a trade. Clear meta only if the
+                # exchange confirms the position is already gone (phantom);
+                # otherwise retain it and retry next cycle.
                 error = order.status or "Unknown error"
                 self._log.error("Failed to close position: %s", error)
+                reconciled = self._reconcile_if_absent(symbol, reason)
+                if reconciled is not None:
+                    return reconciled
                 return {"success": False, "pnl": 0.0, "price": 0.0,
                         "error": error}
 

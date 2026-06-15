@@ -179,9 +179,52 @@ def test_live_close_failure_does_not_record_or_clear(tmp_path):
     assert close["success"] is False
     assert close["error"] == "not enough tradable balance"
     assert close["pnl"] == 0.0
-    # On failure: NOT recorded, RiskState retained
+    # On failure with the position STILL on the exchange: NOT recorded,
+    # RiskState retained (genuine transient failure → retry next cycle).
     assert len(eng._trade_history) == 0
     assert eng._risk_state.get("BTC/USDT") is not None
+
+
+def test_live_close_rejected_for_absent_position_reconciles_phantom(tmp_path):
+    """A reduce-only close rejected BECAUSE the position no longer exists on the
+    exchange (e.g. catastrophe stop already fired) must clear the local tracking
+    instead of retrying forever. This is the 2026-06-15 phantom-close-loop bug:
+    the exchange returned "direction: invalid" every cycle for days because the
+    position was already flat but _risk_entry still held it.
+    """
+    cfg = _paper_config(tmp_path)
+    eng = ExecutionEngine(cfg, mode="paper", trade_direction="both")
+    eng.mode = "live"
+
+    class _PhantomClient(_StubClient):
+        def create_order(self, symbol, side, amount, *, order_type="market",
+                         price=None, reduce_only=False):
+            self.calls.append({"symbol": symbol, "side": side})
+            raise OrderRejected("direction: invalid")
+
+        def fetch_positions(self):
+            # Exchange is flat — the position the bot thinks it holds is gone.
+            return []
+
+    eng._client = _PhantomClient()
+    eng._risk_entry["BTC/USDT"] = {
+        "symbol": "BTC/USDT", "side": "buy", "amount": 0.2,
+        "entry_price": 100.0, "unrealized_pnl": 0.0,
+    }
+    eng._risk_state.set("BTC/USDT", stop_loss=98.0, take_profit=0.0,
+                        trailing_stop=False, trailing_activation=2.0,
+                        trailing_distance=0.5, entry_price=100.0, side="buy")
+
+    close = eng.close_position("BTC/USDT", reason="stop_loss")
+
+    # No real fill happened, so it is not a successful trade...
+    assert close["success"] is False
+    assert len(eng._trade_history) == 0
+    # ...but the phantom MUST be reconciled away so the loop stops.
+    assert eng._risk_state.get("BTC/USDT") is None
+    assert "BTC/USDT" not in eng._risk_entry
+    # signalled to the caller so the main loop does not re-attempt forever
+    assert close.get("reconciled") is True
 
 
 # ---------------------------------------------------------------------------
