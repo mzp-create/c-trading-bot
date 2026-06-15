@@ -12,9 +12,13 @@ import bitfinex.keyguard as keyguard_mod
 def _patch_heavy_deps(monkeypatch):
     # Never construct a real bfxapi client or touch the real key registry.
     monkeypatch.setattr(rest_mod, "BfxRest",
-                        lambda **k: types.SimpleNamespace(get_ticker=lambda s: None))
+                        lambda **k: types.SimpleNamespace(
+                            get_ticker=lambda s: None,
+                            get_account_id=lambda: None))
     monkeypatch.setattr(keyguard_mod, "register_key", lambda *a, **k: None)
     monkeypatch.setattr(keyguard_mod, "release_key", lambda *a, **k: None)
+    monkeypatch.setattr(keyguard_mod, "register_account", lambda *a, **k: None)
+    monkeypatch.setattr(keyguard_mod, "release_account", lambda *a, **k: None)
 
 
 def _cfg():

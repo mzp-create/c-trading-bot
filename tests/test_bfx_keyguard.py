@@ -5,7 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
-from bitfinex.keyguard import register_key, release_key
+from bitfinex.keyguard import (register_key, release_key,
+                               register_account, release_account)
 from bitfinex.errors import KeyConflictError
 
 
@@ -43,3 +44,42 @@ def test_release(tmp_path):
     release_key(reg, api_key="KEYAAA")
     # After release, another instance may take the same key.
     register_key(reg, instance="short", api_key="KEYAAA", pid=os.getpid())
+
+
+# --- account-level guard (two distinct keys on ONE Bitfinex account) ---------
+
+def test_same_account_different_instance_conflicts(tmp_path):
+    reg = str(tmp_path / "reg.json")
+    register_account(reg, instance="long", account_id="617275", pid=os.getpid())
+    # Different instance, SAME account (distinct keys but one account) -> conflict.
+    with pytest.raises(KeyConflictError):
+        register_account(reg, instance="short", account_id="617275",
+                         pid=os.getpid())
+
+
+def test_same_account_same_instance_pid_ok(tmp_path):
+    reg = str(tmp_path / "reg.json")
+    # Two clients in ONE process (collector + engine) share instance+pid.
+    register_account(reg, instance="long", account_id="617275", pid=os.getpid())
+    register_account(reg, instance="long", account_id="617275", pid=os.getpid())
+
+
+def test_distinct_accounts_ok(tmp_path):
+    reg = str(tmp_path / "reg.json")
+    register_account(reg, instance="long", account_id="617275", pid=os.getpid())
+    register_account(reg, instance="short", account_id="999999", pid=os.getpid())
+
+
+def test_account_and_key_slots_coexist(tmp_path):
+    reg = str(tmp_path / "reg.json")
+    register_key(reg, instance="long", api_key="KEYAAA", pid=os.getpid())
+    # An account claim must not clobber/conflict with a key claim in the same file.
+    register_account(reg, instance="long", account_id="617275", pid=os.getpid())
+
+
+def test_release_account(tmp_path):
+    reg = str(tmp_path / "reg.json")
+    register_account(reg, instance="long", account_id="617275", pid=os.getpid())
+    release_account(reg, account_id="617275")
+    # After release, another instance may claim the account.
+    register_account(reg, instance="short", account_id="617275", pid=os.getpid())

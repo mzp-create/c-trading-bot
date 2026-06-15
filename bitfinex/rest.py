@@ -46,6 +46,18 @@ class BfxRest:
         return self._order_from_bfx(notif.data, symbol, side, order_type,
                                     abs(amount), reduce_only)
 
+    def get_account_id(self) -> Optional[str]:
+        """Bitfinex user id for the authenticated key. Identical for every API
+        key on one account; a sub-account has its own id. Returns None if the
+        id can't be read (fail-open so a transient API hiccup doesn't block
+        startup)."""
+        try:
+            info = self._client.rest.auth.get_user_info()
+        except Exception:
+            return None
+        uid = getattr(info, "id", None)
+        return str(uid) if uid is not None else None
+
     def cancel_order(self, order_id: int) -> Order:
         try:
             notif = self._client.rest.auth.cancel_order(id=order_id)

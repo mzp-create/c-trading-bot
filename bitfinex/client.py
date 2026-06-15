@@ -48,6 +48,22 @@ class BitfinexClient:
                             api_key=api_key)
             self._auth = BfxRest(api_key=api_key, api_secret=api_secret)
             self._ticker_source = self._auth
+            # Account-level guard: refuse a 2nd live instance on the SAME
+            # Bitfinex account — two keys on one account net each other's
+            # positions per symbol, so long/short need separate sub-accounts.
+            # Configurable (exchange.account_guard, default on); fail-open if
+            # the account id can't be read.
+            if ex.get("account_guard", True):
+                account_id = self._auth.get_account_id()
+                if account_id is not None:
+                    keyguard.register_account(
+                        KEY_REGISTRY_PATH, instance=instance,
+                        account_id=account_id, pid=os.getpid())
+                    atexit.register(keyguard.release_account, KEY_REGISTRY_PATH,
+                                    account_id=account_id)
+                else:
+                    log.warning("Could not read Bitfinex account id — account "
+                                "guard skipped for instance %r", instance)
             ws_cfg = ex.get("ws", {})
             if enable_ws and ws_cfg.get("enabled", True):
                 self._start_ws(config, api_key, api_secret, ws_cfg)
