@@ -1,5 +1,8 @@
 #!/bin/bash
-# Start both long and short trading instances
+# Start trading instances. LONG-ONLY for now (shorting paused 2026-06-18).
+# The SHORT instance is disabled below — re-enable it only after creating a
+# separate Bitfinex sub-account for it (two keys on one account net each other;
+# the account guard would refuse the 2nd instance anyway).
 # Usage: ./start_dual.sh [--paper|--live]
 
 set -e
@@ -84,21 +87,24 @@ echo "  ✓ Logs: instances/long/logs/stdout.log"
 echo "  ✓ Data: instances/long/data/"
 check_started "LONG" "$LONG_PID" "instances/long/logs/stdout.log" || FAILED=1
 
-echo ""
-echo "Starting SHORT instance..."
-# Subshell so the SHORT key export stays isolated to this instance.
-(
-    export BITFINEX_API_KEY="${BITFINEX_SHORT_API_KEY:-${BITFINEX_API_KEY:-}}"
-    export BITFINEX_API_SECRET="${BITFINEX_SHORT_API_SECRET:-${BITFINEX_API_SECRET:-}}"
-    nohup python3 main.py --mode "$MODE" --instance short --config config/short.yaml \
-        > instances/short/logs/stdout.log 2>&1 &
-    echo $! > instances/short/pid
-)
-SHORT_PID=$(cat instances/short/pid)
-echo "  ✓ Short bot PID: $SHORT_PID"
-echo "  ✓ Logs: instances/short/logs/stdout.log"
-echo "  ✓ Data: instances/short/data/"
-check_started "SHORT" "$SHORT_PID" "instances/short/logs/stdout.log" || FAILED=1
+# --- SHORT instance DISABLED (long-only focus, 2026-06-18) ---
+# To re-enable: create a Bitfinex sub-account, set BITFINEX_SHORT_API_KEY/SECRET
+# to its keys, then uncomment this block.
+# echo ""
+# echo "Starting SHORT instance..."
+# # Subshell so the SHORT key export stays isolated to this instance.
+# (
+#     export BITFINEX_API_KEY="${BITFINEX_SHORT_API_KEY:-${BITFINEX_API_KEY:-}}"
+#     export BITFINEX_API_SECRET="${BITFINEX_SHORT_API_SECRET:-${BITFINEX_API_SECRET:-}}"
+#     nohup python3 main.py --mode "$MODE" --instance short --config config/short.yaml \
+#         > instances/short/logs/stdout.log 2>&1 &
+#     echo $! > instances/short/pid
+# )
+# SHORT_PID=$(cat instances/short/pid)
+# echo "  ✓ Short bot PID: $SHORT_PID"
+# echo "  ✓ Logs: instances/short/logs/stdout.log"
+# echo "  ✓ Data: instances/short/data/"
+# check_started "SHORT" "$SHORT_PID" "instances/short/logs/stdout.log" || FAILED=1
 
 if [ "${FAILED:-0}" = "1" ]; then
     echo ""
@@ -110,17 +116,15 @@ fi
 
 echo ""
 echo "=========================================="
-echo "Both instances started successfully!"
+echo "Long instance started successfully! (short disabled — long-only focus)"
 echo "=========================================="
 echo ""
 echo "Monitor commands:"
 echo "  Long bot:   tail -f instances/long/logs/stdout.log"
-echo "  Short bot:  tail -f instances/short/logs/stdout.log"
 echo ""
 echo "Status:       ./status_dual.sh"
 echo "Stop:         ./stop_dual.sh"
 echo ""
 echo "Telegram alerts will show:"
 echo "  🟢 LONG - for long instance trades"
-echo "  🔴 SHORT - for short instance trades"
 echo ""

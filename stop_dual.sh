@@ -1,5 +1,7 @@
 #!/bin/bash
-# Stop both long and short trading instances
+# Stop trading instances. LONG-ONLY for now (shorting paused 2026-06-18) — the
+# short graceful-stop is skipped, but a stray short is still reaped defensively
+# at the end in case one was launched manually.
 
 cd "$(dirname "$0")"
 
@@ -52,9 +54,9 @@ stop_instance() {
 }
 
 stop_instance "long"
-stop_instance "short"
+# short is paused (long-only focus); graceful-stop skipped. Still reaped below.
 
-# Clean up any remaining processes
+# Clean up any remaining processes (incl. any manually-launched stray short)
 echo ""
 echo "Cleaning up remaining processes..."
 pkill -f "main.py.*--instance long" 2>/dev/null || true
