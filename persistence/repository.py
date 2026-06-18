@@ -7,9 +7,15 @@ trading path never crashes because of persistence.
 
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
 from persistence.schema import connect, init_db
+
+
+def _iso_ms(mts: int) -> str:
+    """Epoch-ms -> ISO8601 UTC, to compare against trades.ts (ISO strings)."""
+    return datetime.fromtimestamp(mts / 1000, tz=timezone.utc).isoformat()
 from persistence.models import (
     OrderRecord, FillRecord, PositionRecord,
     TradeRecord, EquitySnapshot, SignalRecord,
@@ -146,6 +152,71 @@ class TradingRepository:
             self._conn.commit()
             return cur.lastrowid
         return self._safe(_do, -1)
+
+    # ── ledger (authoritative P&L/fee source of truth) ───────────────────
+    def upsert_ledger_entry(self, entry, *, ts: str) -> bool:
+        """Insert a ledger entry keyed by exchange ledger id. Idempotent:
+        returns True if newly inserted, False if it already existed."""
+        def _do():
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO ledger_entries "
+                "(id,mts,ts,instance,currency,kind,amount,balance,price,symbol,"
+                "description,mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (entry.id, entry.mts, ts, self.instance, entry.currency,
+                 entry.kind, entry.amount, entry.balance, entry.price,
+                 entry.symbol, entry.description, self.mode))
+            self._conn.commit()
+            return cur.rowcount > 0
+        return self._safe(_do, False)
+
+    def last_ledger_mts(self) -> int:
+        """Highest ledger mts seen (watermark for incremental reconcile)."""
+        def _do():
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(mts), 0) FROM ledger_entries").fetchone()
+            return int(row[0])
+        return self._safe(_do, 0)
+
+    def ledger_summary(self) -> dict:
+        """Authoritative realized P&L / fees / funding / equity from the ledger."""
+        def _do():
+            def _sum(kind):
+                row = self._conn.execute(
+                    "SELECT COALESCE(SUM(amount),0.0), COUNT(*) FROM "
+                    "ledger_entries WHERE kind=?", (kind,)).fetchone()
+                return float(row[0]), int(row[1])
+            realized, n_closes = _sum("position_close")
+            fees, n_fees = _sum("trading_fee")
+            funding, _ = _sum("funding")
+            bal_row = self._conn.execute(
+                "SELECT balance FROM ledger_entries WHERE balance IS NOT NULL "
+                "ORDER BY mts DESC LIMIT 1").fetchone()
+            return {
+                "realized_pnl": realized, "fees": fees, "funding": funding,
+                "net_pnl": realized + fees + funding,
+                "current_balance": (float(bal_row[0]) if bal_row else None),
+                "n_closes": n_closes, "n_fees": n_fees,
+            }
+        return self._safe(_do, {"realized_pnl": 0.0, "fees": 0.0,
+                                "funding": 0.0, "net_pnl": 0.0,
+                                "current_balance": None, "n_closes": 0,
+                                "n_fees": 0})
+
+    def close_recorded_near(self, symbol: str, close_price: float,
+                            mts: int, *, price_tol: float = 0.002,
+                            time_tol_ms: int = 600_000) -> bool:
+        """Has the bot already recorded a closing trade matching this exchange
+        position-close (same symbol, ~same close price, within a time window)?
+        Used to avoid double-counting when backfilling missed closes."""
+        def _do():
+            lo = _iso_ms(mts - time_tol_ms)
+            hi = _iso_ms(mts + time_tol_ms)
+            row = self._conn.execute(
+                "SELECT 1 FROM trades WHERE symbol=? AND ts>=? AND ts<=? "
+                "AND ABS(close_price-?) <= ?*? LIMIT 1",
+                (symbol, lo, hi, close_price, close_price, price_tol)).fetchone()
+            return row is not None
+        return self._safe(_do, True)  # fail-safe: assume recorded -> no backfill
 
     # ── reads ────────────────────────────────────────────────────────────
     def _trade_from_row(self, r) -> TradeRecord:

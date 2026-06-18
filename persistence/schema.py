@@ -97,12 +97,33 @@ CREATE TABLE IF NOT EXISTS signals (
   FOREIGN KEY (order_id) REFERENCES orders(id)
 );
 
+-- Authoritative exchange ledger (source of truth for realized P&L + fees on
+-- Bitfinex margin, where the per-trade fee is 0 and exchange-side closes never
+-- reach the bot's own close path). `id` is the exchange ledger id so
+-- reconciliation is idempotent via INSERT OR IGNORE.
+CREATE TABLE IF NOT EXISTS ledger_entries (
+  id           INTEGER PRIMARY KEY,
+  mts          INTEGER NOT NULL,
+  ts           TEXT    NOT NULL,
+  instance     TEXT    NOT NULL,
+  currency     TEXT,
+  kind         TEXT    NOT NULL,
+  amount       REAL    NOT NULL,
+  balance      REAL,
+  price        REAL,
+  symbol       TEXT,
+  description  TEXT,
+  mode         TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_orders_ts        ON orders(ts);
 CREATE INDEX IF NOT EXISTS idx_trades_ts        ON trades(ts);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol    ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_equity_ts        ON equity_snapshots(ts);
 CREATE INDEX IF NOT EXISTS idx_signals_ts       ON signals(ts);
+CREATE INDEX IF NOT EXISTS idx_ledger_mts        ON ledger_entries(mts);
+CREATE INDEX IF NOT EXISTS idx_ledger_kind       ON ledger_entries(kind);
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 """

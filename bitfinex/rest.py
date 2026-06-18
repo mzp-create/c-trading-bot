@@ -46,6 +46,15 @@ class BfxRest:
         return self._order_from_bfx(notif.data, symbol, side, order_type,
                                     abs(amount), reduce_only)
 
+    def get_ledgers(self, currency: str, start: Optional[int] = None,
+                    limit: int = 2500) -> list:
+        """Wallet ledger entries (realized P&L, fees, funding) as typed
+        LedgerEntry objects — the source of truth for margin P&L/fees."""
+        from bitfinex import ledger
+        rows = self._client.rest.auth.get_ledgers(
+            currency=currency, start=start, limit=limit)
+        return [ledger.from_raw(o) for o in rows]
+
     def get_account_id(self) -> Optional[str]:
         """Bitfinex user id for the authenticated key. Identical for every API
         key on one account; a sub-account has its own id. Returns None if the
