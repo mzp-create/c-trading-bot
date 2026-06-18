@@ -104,6 +104,13 @@ def test_reconcile_no_backfill_when_symbol_unknown():
     assert repo.backfilled == []
 
 
+def test_client_get_ledgers_paper_returns_empty():
+    from bitfinex import BitfinexClient
+    cfg = {"trading": {"initial_capital": 100.0}, "exchange": {"rate_limit": 0.0}}
+    client = BitfinexClient(cfg, mode="paper")
+    assert client.get_ledgers("UST") == []
+
+
 def test_reconcile_real_repo_idempotent(tmp_path):
     """End-to-end against a real sqlite repo: upsert is idempotent on ledger id
     and the summary reflects the authoritative ledger totals."""

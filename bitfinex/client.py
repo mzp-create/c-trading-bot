@@ -126,6 +126,13 @@ class BitfinexClient:
                                  order_type="market", price=price,
                                  reduce_only=True)
 
+    def get_ledgers(self, currency: str, start=None, limit: int = 2500) -> list:
+        """Wallet ledger entries (realized P&L / fees / funding) as typed
+        LedgerEntry objects. Empty in paper mode (PaperBroker has no ledger)."""
+        if hasattr(self._auth, "get_ledgers"):
+            return self._auth.get_ledgers(currency, start=start, limit=limit)
+        return []
+
     def cancel_order(self, order_id: int) -> Order:
         return self._auth.cancel_order(order_id)   # REST: rare path, reliable
 

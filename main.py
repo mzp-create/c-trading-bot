@@ -792,6 +792,9 @@ class TradingBot:
         # Sync existing positions from exchange (for live mode)
         if self.mode == "live":
             self.executor.sync_positions_at_startup()
+            # Reconcile P&L/fees from the ledger so reporting reflects exchange
+            # truth from boot (not just the bot's own — overstated — trade log).
+            self._maybe_reconcile_ledger()
 
         # On first run, train ML models for each symbol
         for s in self.symbols:
@@ -879,6 +882,10 @@ class TradingBot:
                 cycle_count += 1
                 if cycle_count % 24 == 0:  # Every ~24 minutes in 1-min cycles, but with sleep
                     self._maybe_retrain_ml()
+
+                # Periodic P&L/fee reconcile from the exchange ledger (truth).
+                if cycle_count % 30 == 0:
+                    self._maybe_reconcile_ledger()
 
                 # Sleep between cycles (adjust based on market conditions)
                 sleep_time = max(30, min(300, self.risk.get_dynamic_interval()))
@@ -1035,6 +1042,47 @@ class TradingBot:
                 if df is not None:
                     self.ml_predictor.train(df, symbol=symbol)
                     self.log.info(f"[{symbol}] ML model retrained")
+
+    def _maybe_reconcile_ledger(self):
+        """Reconcile realized P&L + fees from the exchange ledger (the source of
+        truth on Bitfinex margin) and backfill any exchange-side closes the bot
+        didn't record. Live-only, incremental via the ledger watermark, and
+        never raises into the trading loop.
+
+        On the very first run (empty ledger table) we only populate/establish
+        the watermark — backfill is skipped to avoid flooding the trade log with
+        the account's entire pre-bot history. Subsequent runs backfill only the
+        new closes since the watermark.
+        """
+        if self.mode != "live":
+            return
+        try:
+            from execution.ledger_reconciler import reconcile
+            client = getattr(self.executor, "_client", None)
+            repo = getattr(self.executor, "_repo", None)
+            if client is None or repo is None:
+                return
+            # Reference prices for attributing a close to a symbol (WS-cached
+            # tickers; cheap and only runs periodically).
+            refs = {}
+            for s in self.symbols:
+                name = s.get("name")
+                try:
+                    refs[name] = float(client.fetch_ticker(name).last)
+                except Exception:
+                    pass
+            first_run = repo.last_ledger_mts() == 0
+            summary = reconcile(client, repo, currencies=["UST", "USD"],
+                                symbol_refs=refs, backfill=not first_run)
+            if summary.get("new_entries") or summary.get("backfilled"):
+                self.log.info(
+                    "Ledger reconcile: +%d entries, %d backfilled | "
+                    "realized=$%.2f fees=$%.2f net=$%.2f equity=$%s",
+                    summary["new_entries"], summary["backfilled"],
+                    summary["realized_pnl"], summary["fees"],
+                    summary["net_pnl"], summary["current_balance"])
+        except Exception as exc:
+            self.log.error("Ledger reconcile failed: %s", exc)
 
     def _check_telegram_commands(self):
         """Poll Telegram for slash commands and execute them."""
