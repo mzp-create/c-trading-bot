@@ -20,10 +20,12 @@ trading:
       allocation_pct: 20.0
       enabled: true
   
-  initial_capital: 263.4  # 50% of $526.80 total
+  initial_capital: 519.0  # full account equity — short instance is disabled so
+  # the long instance owns the whole margin wallet (was 263.4, half the old
+  # dual-instance split). 2026-06-18 size-up to make P&L visible.
   daily_target: 7.5        # ~2.8%/day target (was 12.5 / 4.7% — unrealistic)
   # Fraction of capital RISKED per trade (loss if stop hit). See default.yaml.
-  max_risk_per_trade: 0.02  # 2% max risk per trade
+  max_risk_per_trade: 0.04  # 4% risk/trade (was 0.02) — aggressive size-up
   max_open_positions: 3   # 1 per pair max
   position_size_mode: "dynamic"
   min_position_value_usd: 15.0  # Floor just above Bitfinex minimums. Was $50,
@@ -157,11 +159,12 @@ risk:
   # Leverage = MAX margin multiplier (cap = capital*leverage*max_single_pct)
   # and the margin/liquidation-guard divisor. Modest 2x. See default.yaml.
   leverage: 2.0           # 2x margin leverage (was 5x)
-  # Daily-loss circuit breaker ~3% of this instance's $263.40 (~$8).
-  # Trips before max_drawdown_pct (~$26) so the daily breaker fires first.
-  max_daily_loss: 8.0     # ~$8 (~3%) daily loss limit for this instance
-  max_drawdown_pct: 10.0  # ~$26 on $263.40
-  max_single_pct: 0.20    # Base cap fraction; effective cap = *leverage
+  # Daily-loss circuit breaker ~3% of this instance's $519 equity (~$16).
+  # Trips before max_drawdown_pct (~$52) so the daily breaker fires first.
+  # Scaled up with the 2026-06-18 size-up (was $8 on the old $263 base).
+  max_daily_loss: 16.0    # ~$16 (~3%) daily loss limit for this instance
+  max_drawdown_pct: 10.0  # ~$52 on $519
+  max_single_pct: 0.50    # Base cap fraction (was 0.20); effective cap = *leverage
   stop_loss_pct: 2.0
   take_profit_pct: 4.0
   trailing_stop: true
