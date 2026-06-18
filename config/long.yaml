@@ -166,7 +166,11 @@ risk:
   max_drawdown_pct: 10.0  # ~$52 on $519
   max_single_pct: 0.50    # Base cap fraction (was 0.20); effective cap = *leverage
   stop_loss_pct: 2.0
-  take_profit_pct: 4.0
+  # Take profit sooner (2026-06-18): was 4.0 → trending TP 6% NEVER fired in 25
+  # trades; winners exited ~+2% via the trailing stop. 2.0 base gives effective
+  # TP ~3.0% TRENDING / 2.0% VOLATILE / 1.4% RANGING — a realistic ceiling that
+  # catches fast spikes while the trailing stop still handles the rest at ~+2%.
+  take_profit_pct: 2.0
   trailing_stop: true
   trailing_stop_activation: 2.0
   trailing_stop_distance: 0.5
